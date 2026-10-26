@@ -175,11 +175,11 @@ public sealed class DesktopBlockedStateTests
     }
 
     /// <summary>
-    /// Six capture and input operations are refused with <c>E_BLOCKED</c> while the desktop is
-    /// blocked, and the inner surface is never reached.
+    /// Five input operations are refused with <c>E_BLOCKED</c> while the desktop is blocked, and the
+    /// inner surface is never reached.
     /// </summary>
     [TestMethod]
-    public void GuardedSurfaceRefusesEveryCaptureAndInputOperationWhileBlocked()
+    public void GuardedSurfaceRefusesEveryInputOperationWhileBlocked()
     {
         RecordingDesktopSurface inner = new();
         BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
@@ -187,7 +187,6 @@ public sealed class DesktopBlockedStateTests
 
         Action[] operations =
         [
-            () => surface.CapturePng(),
             () => surface.MovePointer(1, 1),
             () => surface.Click(1, 1, MouseButton.Left, 1),
             () => surface.Scroll(1, 1, 0, 120),
@@ -209,7 +208,27 @@ public sealed class DesktopBlockedStateTests
         Assert.AreEqual(
             0,
             inner.CallCount,
-            "A refused call must never reach the inner surface, or a frame of the wrong desktop would be captured and input would land on a protected desktop.");
+            "A refused call must never reach the inner surface, or input would land on a protected desktop.");
+    }
+
+    /// <summary>
+    /// The screenshot stays available while blocked: section 1.3 keeps the read-only tools working so
+    /// the operator can judge the prompt from the frame.
+    /// </summary>
+    [TestMethod]
+    public void GuardedSurfaceStillCapturesWhileBlocked()
+    {
+        RecordingDesktopSurface inner = new();
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
+        GuardedDesktopSurface surface = new(inner, guard);
+
+        byte[] frame = surface.CapturePng();
+
+        CollectionAssert.AreEqual(inner.Frame, frame);
+        Assert.AreEqual(
+            1,
+            inner.CallCount,
+            "The screenshot must reach the inner surface in the blocked state, because the operator needs the frame.");
     }
 
     /// <summary>All six operations are forwarded exactly once when the desktop is usable.</summary>
@@ -377,7 +396,7 @@ public sealed class DesktopBlockedStateTests
     private static string BlockedMessageFor(DesktopBlockObservation observation)
     {
         GuardedDesktopSurface surface = new(new RecordingDesktopSurface(), BlockedGuardFor(observation));
-        SessionOperationException error = Assert.ThrowsExactly<SessionOperationException>(() => surface.CapturePng());
+        SessionOperationException error = Assert.ThrowsExactly<SessionOperationException>(() => surface.MovePointer(1, 1));
         Assert.AreEqual(SessionErrorCode.Blocked, error.Code);
         return error.Message;
     }

@@ -6,15 +6,15 @@ namespace SoulComputerUse.Windows.Desktop;
 
 /// <summary>
 /// Decides a tool call against the desktop before it reaches the surface. While the desktop is
-/// locked, protected or non-interactive every capture and input call is refused with
-/// <c>E_BLOCKED</c>, and the inner surface is never reached: a refused call must not leave a frame
-/// of the wrong desktop or a keystroke on a UAC prompt behind.
+/// locked, protected or non-interactive every input call is refused with <c>E_BLOCKED</c>, and the
+/// inner surface is never reached: a refused call must not leave a keystroke or a click on a UAC
+/// prompt behind.
 /// </summary>
 /// <remarks>
-/// <see cref="GetScreen"/> is deliberately not guarded. Reading the desktop bounds changes nothing on
-/// the desktop and is needed by the status path, which stays readable in every state; only capture
-/// and input are gated. Whether a blocked session may still capture a frame is a question for the
-/// caller's state rules, not for this decorator.
+/// <see cref="GetScreen"/> and <see cref="CapturePng"/> are deliberately not guarded. Section 1.3 of
+/// the contract keeps the read-only tools available in the blocked state, and a frame is exactly what
+/// the operator needs to judge a UAC prompt; reading bounds and capturing change nothing on the
+/// desktop. Only input is gated, and the blocked state itself is reported through the status path.
 /// </remarks>
 public sealed class GuardedDesktopSurface : IDesktopSurface
 {
@@ -37,11 +37,12 @@ public sealed class GuardedDesktopSurface : IDesktopSurface
         return _inner.GetScreen();
     }
 
-    /// <summary>Captures one frame after the desktop check passes.</summary>
-    /// <exception cref="SessionOperationException">The desktop cannot accept the call.</exception>
+    /// <summary>
+    /// Captures one frame without a blocked check: section 1.3 keeps the read-only screenshot tool
+    /// working while blocked, because the operator needs the frame to judge the prompt.
+    /// </summary>
     public byte[] CapturePng()
     {
-        _guard.EnsureUsable();
         return _inner.CapturePng();
     }
 
