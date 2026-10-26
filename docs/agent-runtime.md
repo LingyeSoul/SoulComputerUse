@@ -66,23 +66,37 @@ SoulComputerUse.Host.exe --attach-agent <uuid> --agent-nonce <32-hex>
 - 建议先启动代理，再在 25 秒内启动 Host；若 Host 先启动且代理已在运行，代理在记录出现后会尽快开始监听，Host 的连接超时为 5 秒。
 - 宿主在握手后读取代理进程的 Windows 会话 ID，并写入 owner 记录的 `subagentWtsSessionId`；代理在记录尚未更新时按“等待管道认领”分支继续。
 
+## 4.1 新建会话模式
+
+```text
+SoulComputerUse.Host.exe --new-session
+```
+
+- 不需要任何参数：会话 UUID 与绑定 nonce 由 Host 生成，不接受外部传入。
+- 三段时序：
+  1. **连接前**：取单实例锁 → 读/接管所有权记录 → 写 `starting` → 探测档位（`none` 拒绝）→ 遗留子会话 sweep → 子会话开关（必要时提权并回读）→ 写 alternate shell 属性。
+  2. **连接**：唯一入口发起 RDP 连接；窗口显示 Windows 登录界面，标题栏进入 `awaiting-credentials`；等待期间持续泵消息，因此登录界面正常绘制。
+  3. **登录后**：用户亲手登录 → 代理作为 alternate shell 启动 → 连接 agent 管道 → 写 `subagentWtsSessionId` → 启动 owner 管道 → `connecting` → `ready`。
+- 登录档不可跳过：控件若从 `connecting` 直跳 `connected`（`2 → 1`），判 `E_STATE` 并中止，不进入登录后段。
+- 等待上限 10 分钟；超时按 `E_AGENT_TIMEOUT` 中止。
+
 ## 5. 当前未完成项
 
-- Host 还没有通过 RDP alternate shell 自动拉起代理；alternate shell 的命令行拼装与控制属性写入（含回读校验）已在 `Rdp/Launch` 实现，但尚未接入 Host 的连接流程。当前必须在子会话内手动运行代理。
-- 启动时序已完成三段拆分（连接前 / 等待登录 / 登录后），但三段的生产端口尚未在 Host 中组合；Host 的完整新建会话流程仍在开发中。
 - 代理已在子会话内自行探测档位；但 Hello 探测的系统判定尚未接入，当前注入的 Hello 事实恒为「不可用」，因此实际只会落入 `system-credential` 或 `none`，不会自报 `hello-enrolled`、也不会给出 `helloNotEnrolled`。
 - owner 管道已使用显式 DACL（仅当前用户与 LocalSystem），并做双向对端 SID 校验与 8 MiB 单帧上限；仍没有 nonce、心跳与消息加密。
 - agent 管道的跨账户 DACL、真实子会话、安全桌面/锁定桌面尚未实测。
-- 关闭流程已接入 Host：确认关闭后进入 closing、注销子会话、关回开关（仅当本会话开启过）、释放锁；但子会话开关的开启路径尚未实现，因此 `childSessionsOpenedByUs` 目前恒为 false。
+- `blocked` 与 `awaiting-credentials` 下的宿主截图（`Rdp/Capture`）尚未接入 owner 管道的 `screenshot`。
 - 真实注销子会话与真实关回开关均未在真机验证；测试只用假会话表与假开关。
 - 结束会话时不会主动结束子会话之外的任何会话；注销目标只允许本产品子会话。
 
 ## 6. 手动验收步骤
 
 1. 构建：`dotnet build SoulComputerUse.slnx`。
-2. 在子会话内启动代理，只需传入会话 UUID 与 nonce（档位由代理自行探测）。
-3. 在控制台启动 Host 附加模式，传入同一个 UUID 与 nonce。
-4. 运行 `scu status`，应返回 `state=ready`、`sessionId`、`authTier`、`gateStrength` 与屏幕尺寸。
-5. 运行 `scu shot --out <临时文件>`，应得到子会话桌面的 PNG。
-6. 运行 `scu click`、`scu type`、`scu key`，确认输入落在子会话而非控制台桌面。
-7. 关闭 Host，确认 owner 记录删除、单实例锁释放、代理因管道断开退出。
+2. 启动新建会话模式：`SoulComputerUse.Host.exe --new-session`；标题栏应显示「正在连接…」后转为「等待验证」。
+3. 在产品窗口内看到 Windows 登录界面，亲手输入该账户的密码并登录。
+4. 登录后窗口应出现远端子会话桌面，标题栏转为就绪态。
+5. 运行 `scu status`，应返回 `state=ready`、`sessionId`、`authTier`、`gateStrength` 与屏幕尺寸。
+6. 运行 `scu shot --out <临时文件>`，应得到子会话桌面的 PNG。
+7. 运行 `scu click`、`scu type`、`scu key`，确认输入落在子会话而非控制台桌面。
+8. 关闭 Host 并确认，检查 owner 记录删除、单实例锁释放、子会话已注销、代理已退出。
+9. 若要复现失败原因，设置 `SOULCOMPUTERUSE_DIAGNOSTICS=1` 再运行，stderr 会附上异常的完整内层链。
