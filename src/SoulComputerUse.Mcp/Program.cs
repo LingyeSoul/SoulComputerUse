@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Discovery;
+using SoulComputerUse.Windows.Hosting.Headless;
 using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Mcp;
@@ -23,6 +24,11 @@ namespace SoulComputerUse.Mcp;
 /// standard output: the MCP client has not sent a request, so no JSON-RPC message would be valid.
 /// The failure goes to standard error with a non-zero exit code instead.
 /// </para>
+/// <para>
+/// Becoming the owner is opt-in: only <c>SOULCOMPUTERUSE_ALLOW_HEADLESS=1</c> injects the headless
+/// starter, and with the variable absent this process still refuses a free lock with
+/// <c>E_NOT_READY</c>. See <see cref="HeadlessStarterActivation"/>.
+/// </para>
 /// </remarks>
 internal static class Program
 {
@@ -30,13 +36,21 @@ internal static class Program
 
     private static async Task<int> Main()
     {
-        // The starter stays null: this version cannot start a session by itself, so a free lock
-        // without an owner fails with E_NOT_READY. A host layer that implements IOwnerSessionStarter
-        // injects it here, and discovery then starts the session through that starter.
+        // Section 3 allows a CLI or MCP process to become the session owner when the lock is free and
+        // no owner answers. That path is behind HeadlessStarterActivation's environment gate: without
+        // SOULCOMPUTERUSE_ALLOW_HEADLESS=1 discovery gets no starter and still fails a free lock with
+        // E_NOT_READY, and with it the starter refuses this build's placeholder backend with the same
+        // code before the lock is taken, so no path reports a session that cannot serve calls.
+        IOwnerSessionStarter? starter = HeadlessStarterActivation.IsAllowed()
+            ? new HeadlessOwnerStarter(
+                HeadlessStarterActivation.ProductionOptions(static () => new UnavailableSessionClient()),
+                new OwnerProbe())
+            : null;
+
         OwnerSessionResolver resolver = new(
             new OwnerProbe(),
             static () => new NamedPipeSessionClient(),
-            null);
+            starter);
 
         ResolvedSession session;
         try

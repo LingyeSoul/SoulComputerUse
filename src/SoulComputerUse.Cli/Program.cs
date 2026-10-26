@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Discovery;
+using SoulComputerUse.Windows.Hosting.Headless;
 using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Cli;
@@ -18,6 +19,11 @@ namespace SoulComputerUse.Cli;
 /// rather than as "no owner". A failed discovery is reported as one contract error line on the error
 /// stream with a non-zero exit code; the process prints no stack trace, whose absolute paths the log
 /// whitelist forbids.
+/// <para>
+/// Becoming the owner is opt-in: only <c>SOULCOMPUTERUSE_ALLOW_HEADLESS=1</c> injects the headless
+/// starter, and with the variable absent this process still refuses a free lock with
+/// <c>E_NOT_READY</c>. See <see cref="HeadlessStarterActivation"/>.
+/// </para>
 /// </remarks>
 internal static class Program
 {
@@ -58,14 +64,22 @@ internal static class Program
 
         try
         {
-            // The starter stays null: this version cannot start a session by itself, so a free lock
-            // without an owner fails with E_NOT_READY instead of pretending a session exists. A host
-            // layer that implements IOwnerSessionStarter injects it here, and discovery then starts
-            // the session through that starter.
+            // Section 3 allows a CLI or MCP process to become the session owner when the lock is free
+            // and no owner answers. That path is behind HeadlessStarterActivation's environment gate:
+            // without SOULCOMPUTERUSE_ALLOW_HEADLESS=1 discovery gets no starter and still fails a free
+            // lock with E_NOT_READY, and with it the starter refuses this build's placeholder backend
+            // with the same code before the lock is taken, so no path reports a session that cannot
+            // serve calls.
+            IOwnerSessionStarter? starter = HeadlessStarterActivation.IsAllowed()
+                ? new HeadlessOwnerStarter(
+                    HeadlessStarterActivation.ProductionOptions(static () => new UnavailableSessionClient()),
+                    new OwnerProbe())
+                : null;
+
             OwnerSessionResolver resolver = new(
                 new OwnerProbe(),
                 static () => new NamedPipeSessionClient(),
-                null);
+                starter);
 
             await using ResolvedSession session = await resolver.ResolveAsync(CancellationToken.None);
             CliRunner runner = new(session.Client, Console.In, Console.Out, Console.Error);
