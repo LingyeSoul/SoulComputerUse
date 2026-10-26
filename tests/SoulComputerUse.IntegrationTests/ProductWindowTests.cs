@@ -397,9 +397,125 @@ public sealed class ProductWindowTests
     }
 
     /// <summary>
-    /// Dispatches the thread's window messages until the condition holds. A posted non-client button
-    /// press needs a real dispatch loop, because the default procedure runs its own tracking loop for
-    /// it; a synchronous send would never return.
+    /// A real non-client press and release on the maximize button must actually maximize the window,
+    /// then restore it on the second click. The prior implementation only painted the pressed look:
+    /// with no non-client area the default procedure never completed the press cycle.
+    /// </summary>
+    [TestMethod]
+    public void ClickingTheMaximizeButtonReallyMaximizesAndRestores()
+    {
+        using ProductWindow window = CreateWindow(() => false);
+        int clickX = CentreX(window.Metrics.MaximizeBounds);
+        int clickY = window.Metrics.Height / 2;
+
+        PressAndRelease(window, NativeMethods.HtMaxButton, clickX, clickY);
+        Assert.IsTrue(window.IsMaximized, "A real click on the maximize button must maximize the window.");
+
+        clickX = CentreX(window.Metrics.MaximizeBounds);
+        clickY = window.Metrics.Height / 2;
+        PressAndRelease(window, NativeMethods.HtMaxButton, clickX, clickY);
+        Assert.IsFalse(window.IsMaximized, "A second real click must restore the window.");
+    }
+
+    /// <summary>The close button must still arrive at the confirmation step, never close directly.</summary>
+    [TestMethod]
+    public void ClickingTheCloseButtonAsksBeforeClosing()
+    {
+        int confirmations = 0;
+        using ProductWindow window = CreateWindow(() =>
+        {
+            confirmations++;
+            return false;
+        });
+
+        PressAndRelease(
+            window,
+            NativeMethods.HtClose,
+            CentreX(window.Metrics.CloseBounds),
+            window.Metrics.Height / 2);
+
+        Assert.AreEqual(1, confirmations, "A real click on close must reach the confirmation exactly once.");
+        Assert.IsFalse(window.IsDestroyed, "A refused confirmation must leave the window open.");
+    }
+
+    /// <summary>
+    /// The window keeps the styles the window manager and Snap Layouts need: a maximize box and a
+    /// resize frame. Removing either would silently break Snap Layouts and resizing.
+    /// </summary>
+    [TestMethod]
+    public void TheWindowKeepsTheMaximizeBoxAndResizeFrameStyles()
+    {
+        using ProductWindow window = CreateWindow(() => false);
+        long style = (long)NativeMethods.GetWindowLongPtrW(window.Handle, NativeMethods.GwlpStyle);
+
+        Assert.AreNotEqual(
+            0,
+            style & NativeMethods.WsMaximizeBox,
+            "Without WS_MAXIMIZEBOX the maximize button and Snap Layouts cannot work.");
+        Assert.AreNotEqual(
+            0,
+            style & NativeMethods.WsThickFrame,
+            "Without WS_THICKFRAME the window cannot be resized or snapped.");
+    }
+
+    /// <summary>
+    /// A release can arrive as a client message once the press captured the pointer. That path must
+    /// complete the action too, otherwise a real mouse click would still do nothing.
+    /// </summary>
+    [TestMethod]
+    public void AClickWhoseReleaseArrivesAsAClientMessageStillMaximizes()
+    {
+        using ProductWindow window = CreateWindow(() => false);
+        int clickX = CentreX(window.Metrics.MaximizeBounds);
+        int clickY = window.Metrics.Height / 2;
+
+        PressNonClient(window, NativeMethods.HtMaxButton, clickX, clickY);
+        _ = NativeMethods.SendMessageW(
+            window.Handle,
+            NativeMethods.WmLButtonUp,
+            0,
+            NativeMethods.PackWords(clickX, clickY));
+
+        Assert.IsTrue(
+            window.IsMaximized,
+            "A release delivered as WM_LBUTTONUP after capture must still perform the button action.");
+    }
+
+    /// <summary>Dragging off the button and releasing there must not run the action.</summary>
+    [TestMethod]
+    public void ReleasingAwayFromTheButtonDoesNotRunTheAction()
+    {
+        using ProductWindow window = CreateWindow(() => false);
+        PressNonClient(
+            window,
+            NativeMethods.HtMaxButton,
+            CentreX(window.Metrics.MaximizeBounds),
+            window.Metrics.Height / 2);
+
+        _ = NativeMethods.SendMessageW(
+            window.Handle,
+            NativeMethods.WmLButtonUp,
+            0,
+            NativeMethods.PackWords(200, window.Metrics.Height / 2));
+
+        Assert.IsFalse(window.IsMaximized, "Releasing over the caption strip must cancel the maximize click.");
+    }
+
+    private static void PressAndRelease(ProductWindow window, int hitTestCode, int clientX, int clientY)
+    {
+        PressNonClient(window, hitTestCode, clientX, clientY);
+
+        Rectangle windowRectangle = ReadWindowRectangle(window.Handle);
+        nint packedPoint = NativeMethods.PackWords(windowRectangle.Left + clientX, windowRectangle.Top + clientY);
+        _ = NativeMethods.SendMessageW(window.Handle, NativeMethods.WmNcLButtonUp, hitTestCode, packedPoint);
+    }
+
+    private static void PressNonClient(ProductWindow window, int hitTestCode, int clientX, int clientY)
+    {
+        Rectangle windowRectangle = ReadWindowRectangle(window.Handle);
+        nint packedPoint = NativeMethods.PackWords(windowRectangle.Left + clientX, windowRectangle.Top + clientY);
+        _ = NativeMethods.SendMessageW(window.Handle, NativeMethods.WmNcLButtonDown, hitTestCode, packedPoint);
+    }
 
     private static int CentreX(Rectangle bounds)
     {

@@ -19,9 +19,11 @@ namespace SoulComputerUse.Windows.Shell;
 /// </para>
 /// <para>
 /// The caption strip answers <c>HTCAPTION</c> and the three buttons answer their system codes
-/// (<c>HTMINBUTTON</c>, <c>HTMAXBUTTON</c>, <c>HTCLOSE</c>), so the window manager performs every
-/// action and all four close routes converge on <c>WM_CLOSE</c>. The hover and pressed visuals are
-/// painted here from the tracking messages that follow those codes.
+/// (<c>HTMINBUTTON</c>, <c>HTMAXBUTTON</c>, <c>HTCLOSE</c>), so the window manager still offers Snap
+/// Layouts on the maximize button and keeps every native close route. Because the window has no
+/// non-client area, the default procedure cannot complete a non-client button press, so the press
+/// cycle and the action are run here; a close still goes through <c>WM_CLOSE</c> and therefore
+/// through the confirmation.
 /// </para>
 /// </remarks>
 public sealed class ProductWindow : IDisposable
@@ -359,16 +361,23 @@ public sealed class ProductWindow : IDisposable
                 return 1;
             case NativeMethods.WmNcMouseMove when window is not null:
                 // A caption button answers a non-client hit code, so the pointer arrives as a
-                // non-client message; the visual feedback is still drawn by this window, and the
-                // action itself is left to the default procedure.
+                // non-client message; the visual feedback is drawn by this window and the default
+                // procedure keeps the pointer tracking that the window manager needs.
                 window.UpdateHoverFromHitCode((int)wParam, handle);
                 return NativeMethods.DefWindowProcW(handle, message, wParam, lParam);
             case NativeMethods.WmNcLButtonDown when window is not null:
-                window.PressButtonFromHitCode((int)wParam);
-                return NativeMethods.DefWindowProcW(handle, message, wParam, lParam);
+                return window.PressCaptionButton(handle, (int)wParam, lParam);
             case NativeMethods.WmNcLButtonUp when window is not null:
-                window.ReleaseButtonFromHitCode((int)wParam);
-                return NativeMethods.DefWindowProcW(handle, message, wParam, lParam);
+                return window.ReleaseCaptionButton(handle, (int)wParam, lParam);
+            case NativeMethods.WmCaptureChanged when window is not null:
+                // A lost capture means the button up will never arrive, so the pressed look must
+                // not be left behind and the action must not fire later by accident.
+                window.CancelPressedButton();
+                return 0;
+            case NativeMethods.WmLButtonUp when window is not null:
+                // With no non-client area the release can arrive as a client message; dropping it
+                // would leave the pressed button stuck forever.
+                return window.ReleaseCaptionButtonOnClientUp(handle, lParam);
             case NativeMethods.WmNcMouseLeave when window is not null:
                 window.ClearPointerState();
                 return 0;
@@ -608,17 +617,117 @@ public sealed class ProductWindow : IDisposable
         }
     }
 
-    private void PressButtonFromHitCode(int hitTestCode)
+    /// <summary>
+    /// Handles a real non-client left-button press on one of the caption buttons.
+    /// </summary>
+    /// <remarks>
+    /// The window covers its whole frame (<c>WM_NCCALCSIZE</c> answers zero), so the default
+    /// procedure has no non-client button rectangle to press: it captures the pointer, paints the
+    /// pressed look and then never completes the action. The buttons therefore run their own press
+    /// cycle, while the hit test keeps answering the system codes so the window manager still offers
+    /// Snap Layouts for the maximize button.
+    /// </remarks>
+    private nint PressCaptionButton(nint handle, int hitTestCode, nint packedPoint)
     {
-        _pressedButton = CaptionHitTest.ButtonFromHitTestCode(hitTestCode);
+        CaptionButtonKind? kind = CaptionHitTest.ButtonFromHitTestCode(hitTestCode);
+        if (kind is null)
+        {
+            // Everything that is not a caption button keeps the default behaviour, which is what
+            // makes dragging the strip and double-click-to-maximize work.
+            return NativeMethods.DefWindowProcW(handle, NativeMethods.WmNcLButtonDown, hitTestCode, packedPoint);
+        }
+
+        _pressedButton = kind;
+        _hoveredButton = kind;
+        _ = NativeMethods.SetCapture(handle);
+        RequestRepaint();
+        return 0;
+    }
+
+    /// <summary>Completes the press cycle after a non-client button release.</summary>
+    private nint ReleaseCaptionButton(nint handle, int hitTestCode, nint packedPoint)
+    {
+        if (_pressedButton is null)
+        {
+            return NativeMethods.DefWindowProcW(handle, NativeMethods.WmNcLButtonUp, hitTestCode, packedPoint);
+        }
+
+        return CompletePressedButton(CaptionHitTest.ButtonFromHitTestCode(hitTestCode));
+    }
+
+    /// <summary>
+    /// Completes the press cycle when the release arrives as a client message. A window with no
+    /// non-client area can receive the release that way, and dropping it would leave the button stuck.
+    /// </summary>
+    private nint ReleaseCaptionButtonOnClientUp(nint handle, nint packedPoint)
+    {
+        if (_pressedButton is null)
+        {
+            // No caption press is in flight, so this is an ordinary client click and not ours.
+            return NativeMethods.DefWindowProcW(handle, NativeMethods.WmLButtonUp, 0, packedPoint);
+        }
+
+        int x = NativeMethods.SignedLowWord(packedPoint);
+        int y = NativeMethods.SignedHighWord(packedPoint);
+        CaptionPart part = CaptionHitTest.Resolve(_metrics, x, y);
+        return CompletePressedButton(CaptionHitTest.ToButtonKind(part));
+    }
+
+    private nint CompletePressedButton(CaptionButtonKind? releasedOver)
+    {
+        // The pressed kind has to be read before the capture is released: releasing it delivers
+        // WM_CAPTURECHANGED inside this call, which cancels the press state.
+        CaptionButtonKind pressed = _pressedButton
+            ?? throw new InvalidOperationException("A caption press was completed without a pressed button.");
+
+        _ = NativeMethods.ReleaseCapture();
+        _pressedButton = null;
+        _hoveredButton = releasedOver;
+        RequestRepaint();
+
+        if (releasedOver == pressed)
+        {
+            ExecuteCaptionButton(pressed);
+        }
+
+        return 0;
+    }
+
+    /// <summary>Drops a press whose button-up will never arrive, so no action fires later by accident.</summary>
+    private void CancelPressedButton()
+    {
+        if (_pressedButton is null)
+        {
+            return;
+        }
+
+        _pressedButton = null;
         RequestRepaint();
     }
 
-    private void ReleaseButtonFromHitCode(int hitTestCode)
+    /// <summary>
+    /// Runs the action of one caption button through the system commands, so the result is the same
+    /// as the one the window manager would have produced for a native caption.
+    /// </summary>
+    private void ExecuteCaptionButton(CaptionButtonKind kind)
     {
-        _pressedButton = null;
-        _hoveredButton = CaptionHitTest.ButtonFromHitTestCode(hitTestCode);
-        RequestRepaint();
+        nint handle = RequireHandle();
+        switch (kind)
+        {
+            case CaptionButtonKind.Minimize:
+                _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSysCommand, NativeMethods.ScMinimize, 0);
+                break;
+            case CaptionButtonKind.Maximize:
+                int command = NativeMethods.IsZoomed(handle) ? NativeMethods.ScRestore : NativeMethods.ScMaximize;
+                _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSysCommand, command, 0);
+                break;
+            case CaptionButtonKind.Close:
+                // WM_CLOSE is the single close entry point, so the confirmation always runs first.
+                _ = NativeMethods.SendMessageW(handle, NativeMethods.WmClose, 0, 0);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown caption button.");
+        }
     }
 
     private void ClearPointerState()

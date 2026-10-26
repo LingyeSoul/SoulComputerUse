@@ -25,10 +25,13 @@ internal static class NativeMethods
     internal const uint WmNcLButtonDown = 0x00A1;
     internal const uint WmNcLButtonUp = 0x00A2;
     internal const uint WmNcMouseLeave = 0x02A2;
+    internal const uint WmCaptureChanged = 0x0215;
+    internal const uint WmLButtonUp = 0x0202;
     internal const uint WmDpiChanged = 0x02E0;
     internal const uint WmGetMinMaxInfo = 0x0024;
 
     internal const uint WmSysCommand = 0x0112;
+    internal const int ScMinimize = 0xF020;
     internal const int ScMaximize = 0xF030;
     internal const int ScRestore = 0xF120;
     internal const int ScClose = 0xF060;
@@ -58,6 +61,8 @@ internal static class NativeMethods
 
     internal const uint WsOverlappedWindow = 0x00CF0000;
     internal const uint WsCaption = 0x00C00000;
+    internal const uint WsMaximizeBox = 0x00010000;
+    internal const uint WsThickFrame = 0x00040000;
     internal const uint WsVisible = 0x10000000;
     internal const int CwUseDefault = unchecked((int)0x80000000);
     internal const int IdiArrow = 32512;
@@ -216,6 +221,22 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool WTSEnableChildSessions([MarshalAs(UnmanagedType.Bool)] bool enabled);
 
+    // WTS_CURRENT_SESSION and WTS_INFO_CLASS.WTSSessionInfo from wtsapi32.h.
+    internal const uint WtsCurrentSession = 0xFFFFFFFF;
+    internal const int WtsInfoClassSessionInfo = 24;
+
+    [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool WTSQuerySessionInformationW(
+        nint server,
+        uint sessionId,
+        int infoClass,
+        out nint buffer,
+        out int byteCount);
+
+    [DllImport("wtsapi32.dll", EntryPoint = "WTSFreeMemory", SetLastError = true)]
+    internal static extern void WTSFreeMemory(nint memory);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetWindowPos(nint handle, nint insertAfter, int x, int y, int width, int height, uint flags);
@@ -232,6 +253,16 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsZoomed(nint handle);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    internal static extern nint GetWindowLongPtrW(nint handle, int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern nint SetCapture(nint handle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ReleaseCapture();
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
