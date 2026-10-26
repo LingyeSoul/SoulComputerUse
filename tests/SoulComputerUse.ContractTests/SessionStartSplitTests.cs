@@ -494,6 +494,26 @@ public sealed class SessionStartSplitTests
     }
 
     [TestMethod]
+    public void AConnectionThatSkippedTheLogonScreenIsAcceptedWhenAChildSessionHasAUser()
+    {
+        RecordingWaitClock clock = new();
+        Queue<int> remaining = new([2, 1]);
+        SessionConnectionWaiter waiter = new(
+            () => remaining.Dequeue(),
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(500),
+            clock,
+            () => true);
+
+        waiter.Await();
+
+        Assert.IsFalse(waiter.SawAwaitingCredentials, "The client never painted the session's own logon screen.");
+        Assert.IsTrue(
+            waiter.SawLogonThroughSessionUser,
+            "The session's user name is the remaining proof that Windows accepted a logon, so the gate must accept it.");
+    }
+
+    [TestMethod]
     public void AConnectionThatSkippedTheLogonScreenIsRefusedAsAStateViolation()
     {
         RecordingWaitClock clock = new();

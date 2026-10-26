@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Rdp;
 
@@ -42,9 +43,28 @@ public sealed class SessionConnectionWaiter
         TimeSpan interval,
         TimeSpan timeout,
         IWaitClock clock)
+        : this(readConnectedState, interval, timeout, clock, () => false)
+    {
+    }
+
+    /// <summary>
+    /// Creates one waiter that also asks whether the child session already has a logged-on user. That fact is
+    /// the only remaining proof of a real logon when the client asks for the credentials itself, because the
+    /// session then never paints its own logon screen and the state goes straight from connecting to
+    /// connected.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The reader, the logon probe or the clock is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The interval or the timeout is not positive.</exception>
+    public SessionConnectionWaiter(
+        Func<int> readConnectedState,
+        TimeSpan interval,
+        TimeSpan timeout,
+        IWaitClock clock,
+        Func<bool> isChildSessionLoggedOn)
     {
         ArgumentNullException.ThrowIfNull(readConnectedState);
         ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(isChildSessionLoggedOn);
 
         if (interval <= TimeSpan.Zero)
         {
@@ -60,13 +80,40 @@ public sealed class SessionConnectionWaiter
         _interval = interval;
         _timeout = timeout;
         _clock = clock;
+        _isChildSessionLoggedOn = isChildSessionLoggedOn;
     }
+
+    private readonly Func<bool> _isChildSessionLoggedOn;
 
     /// <summary>
     /// Whether the logon screen was reported at least once. False after a refusal that never saw it, which
     /// is the fact that makes such a refusal a bypass rather than a slow logon.
     /// </summary>
     public bool SawAwaitingCredentials { get; private set; }
+
+    /// <summary>
+    /// Whether the logon was proven by the child session's own user name instead of its logon screen. True
+    /// only when the client asked for the credentials itself, in which case the session never paints its own
+    /// logon screen and the state goes straight from connecting to connected.
+    /// </summary>
+    public bool SawLogonThroughSessionUser { get; private set; }
+
+    /// <summary>
+    /// The connected-state numbers observed in order, with consecutive duplicates removed. The list exists
+    /// for diagnostics: when a machine reports a chain the contract does not expect, the chain is the only
+    /// evidence of what the client really did, and it carries no machine-specific data.
+    /// </summary>
+    public IReadOnlyList<int> ObservedStates => _observedStates.AsReadOnly();
+
+    private readonly List<int> _observedStates = [];
+
+    private void RecordObservation(int rawValue)
+    {
+        if (_observedStates.Count == 0 || _observedStates[^1] != rawValue)
+        {
+            _observedStates.Add(rawValue);
+        }
+    }
 
     /// <summary>Waits until the client reports the connected state, and proves the logon was observed first.</summary>
     /// <exception cref="SessionStartException">
@@ -80,7 +127,9 @@ public sealed class SessionConnectionWaiter
         int attempts = Attempts();
         for (int attempt = 0; attempt < attempts; attempt++)
         {
-            RdpConnectedState state = RdpStateMapping.FromRawValue(_readConnectedState());
+            int rawValue = _readConnectedState();
+            RecordObservation(rawValue);
+            RdpConnectedState state = RdpStateMapping.FromRawValue(rawValue);
             switch (state)
             {
                 case RdpConnectedState.AwaitingLogon:
@@ -88,15 +137,23 @@ public sealed class SessionConnectionWaiter
                     break;
 
                 case RdpConnectedState.Connected:
+                    if (!SawAwaitingCredentials && !_isChildSessionLoggedOn())
+                    {
+                        throw Refusal(SessionErrorCode.State, SessionStartSplitMessages.ConnectionLogonBypassed, ObservedStates);
+                    }
+
                     if (!SawAwaitingCredentials)
                     {
-                        throw Refusal(SessionErrorCode.State, SessionStartSplitMessages.ConnectionLogonBypassed);
+                        // The client asked for the credentials itself, so the session never painted its own
+                        // logon screen; the session's own user name is then the proof that the operator
+                        // authenticated, and it is recorded as the logon step the chain would otherwise miss.
+                        SawLogonThroughSessionUser = true;
                     }
 
                     return;
 
                 case RdpConnectedState.Idle:
-                    throw Refusal(SessionErrorCode.Disconnected, SessionStartSplitMessages.ConnectionDisconnected);
+                    throw Refusal(SessionErrorCode.Disconnected, SessionStartSplitMessages.ConnectionDisconnected, ObservedStates);
 
                 case RdpConnectedState.Connecting:
                     break;
@@ -114,7 +171,7 @@ public sealed class SessionConnectionWaiter
             }
         }
 
-        throw Refusal(SessionErrorCode.AgentTimeout, SessionStartSplitMessages.ConnectionTimedOut);
+        throw Refusal(SessionErrorCode.AgentTimeout, SessionStartSplitMessages.ConnectionTimedOut, ObservedStates);
     }
 
     /// <summary>
@@ -127,8 +184,17 @@ public sealed class SessionConnectionWaiter
         return count < 1.0 ? 1 : (int)count;
     }
 
-    private static SessionStartException Refusal(SessionErrorCode code, string reason)
+    /// <summary>
+    /// The <see cref="Exception.Data"/> key under which a refusal carries the observed connected-state chain.
+    /// The chain is the only evidence of what the client really did, so a refusal that names it can be
+    /// diagnosed without a second run.
+    /// </summary>
+    public const string ObservedStatesDataKey = "SoulComputerUse.Hosting.Startup.Split.ObservedStates";
+
+    private static SessionStartException Refusal(SessionErrorCode code, string reason, IReadOnlyList<int> observedStates)
     {
-        return new SessionStartException(code, reason, []);
+        SessionStartException refusal = new(code, reason, []);
+        refusal.Data[ObservedStatesDataKey] = observedStates;
+        return refusal;
     }
 }

@@ -7,6 +7,7 @@ using SoulComputerUse.Windows.Hosting.Startup.Phases;
 using SoulComputerUse.Windows.Hosting.Startup.Production;
 using SoulComputerUse.Windows.Hosting.Startup.Split;
 using SoulComputerUse.Windows.Ipc.Agent;
+using SoulComputerUse.Windows.Native;
 using SoulComputerUse.Windows.Rdp.Launch;
 using SoulComputerUse.Windows.Rdp.SessionLaunch;
 using SoulComputerUse.Windows.SessionLifecycle;
@@ -160,7 +161,8 @@ internal sealed class NewSessionHost : IDisposable
                     () => surface.ConnectedState,
                     LogonPollInterval,
                     LogonTimeout,
-                    new PumpingWaitClock(() => _productWindow is null || _productWindow.IsDestroyed))),
+                    new PumpingWaitClock(() => _productWindow is null || _productWindow.IsDestroyed),
+                    ChildSessionHasLoggedOnUser)),
             _afterLogon,
             new PhaseStatusObserver(() => _productWindow, () => capturing.AuthTier));
 
@@ -283,8 +285,27 @@ internal sealed class NewSessionHost : IDisposable
         }
     }
 
-    private static int ReadChildSessionId(int agentProcessId)
+    /// <summary>
+    /// Reports whether any session other than the console one already has a logged-on user. The client asks
+    /// the operator for credentials itself, so the child session never paints its own logon screen and the
+    /// connected state goes straight from connecting to connected; a non-empty user name in a child session
+    /// is then the proof that Windows accepted a logon. The query never surfaces the name itself.
+    /// </summary>
+    private static bool ChildSessionHasLoggedOnUser()
     {
+        try
+        {
+            return WtsSessionUserQuery.AnyChildSessionHasLoggedOnUser(WtsSessionProbe.GetActiveConsoleSessionId());
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // A failed query must not be read as "nobody logged on": that would turn a real logon into a
+            // bypass refusal. The gate therefore falls back to the logon-screen evidence only.
+            return false;
+        }
+    }
+
+    private static int ReadChildSessionId(int agentProcessId)    {
         if (agentProcessId <= 0)
         {
             return 0;
