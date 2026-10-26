@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SoulComputerUse.ChildSessionsHelper/SoulComputerUse.ChildSessionsHelper.csproj" />
+    <Project Path="src/SoulComputerUse.Cli/SoulComputerUse.Cli.csproj" />
+    <Project Path="src/SoulComputerUse.Core/SoulComputerUse.Core.csproj" />
+    <Project Path="src/SoulComputerUse.Host/SoulComputerUse.Host.csproj" />
+    <Project Path="src/SoulComputerUse.Mcp/SoulComputerUse.Mcp.csproj" />
+    <Project Path="src/SoulComputerUse.RdpCredentialExperiment/SoulComputerUse.RdpCredentialExperiment.csproj" />
+    <Project Path="src/SoulComputerUse.SessionAgent/SoulComputerUse.SessionAgent.csproj" />
+    <Project Path="src/SoulComputerUse.Windows/SoulComputerUse.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SoulComputerUse.ContractTests/SoulComputerUse.ContractTests.csproj" />
+    <Project Path="tests/SoulComputerUse.IntegrationTests/SoulComputerUse.IntegrationTests.csproj" />
+    <Project Path="tests/SoulComputerUse.TestSupport/SoulComputerUse.TestSupport.csproj" />
+  </Folder>
+</Solution>
