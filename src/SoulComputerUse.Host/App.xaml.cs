@@ -1,7 +1,10 @@
 using System;
+using System.IO;
 using System.Windows;
 using System.Windows.Interop;
+using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Hosting;
 using SoulComputerUse.Windows.Native;
 using SoulComputerUse.Windows.Shell;
 
@@ -20,6 +23,7 @@ public partial class App : Application
 
     private SnapHitTestSpikeWindow? _snapHitTestSpikeWindow;
     private ProductWindow? _productWindow;
+    private AgentAttachedSession? _attachedSession;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -32,12 +36,69 @@ public partial class App : Application
         }
 
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        ShowProductWindow();
+
+        if (e.Args.Length > 0)
+        {
+            AttachedAgentOptions options;
+            try
+            {
+                options = AttachedAgentCommandLine.Parse(e.Args);
+            }
+            catch (ArgumentException error)
+            {
+                ShowStartupError(error.Message + Environment.NewLine + AttachedAgentCommandLine.Usage());
+                Shutdown(2);
+                return;
+            }
+
+            try
+            {
+                _attachedSession = AgentAttachedSession.CreateForCurrentProcess(options.SessionId, options.Nonce);
+                _attachedSession.Start();
+            }
+            catch (Exception error) when (IsAttachFailure(error))
+            {
+                ShowStartupError(error.Message);
+                Shutdown(1);
+                return;
+            }
+
+            SessionStatus status = _attachedSession.Status
+                ?? throw new InvalidOperationException("The attached session started without a status.");
+            SessionState state = SessionStateNames.FromWireName(status.State);
+            SessionStatusVisual visual = SessionStatusVisuals.Describe(state, status.AuthTier, status.GateStrength, null);
+            ShowProductWindow(visual, "session");
+        }
+        else
+        {
+            SessionStatusVisual status = SessionStatusVisuals.Describe(
+                SessionState.Starting,
+                AuthTier.HelloEnrolled,
+                GateStrength.Strong,
+                null);
+            ShowProductWindow(status, "example-session");
+        }
+
         Shutdown();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        try
+        {
+            if (_attachedSession is not null)
+            {
+                _attachedSession.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+        }
+        catch (Exception error)
+        {
+            // The exit path is the process boundary: report the failure without a stack trace, whose
+            // absolute paths must never reach a console or a log.
+            Console.Error.WriteLine($"The attached session cleanup failed ({error.GetType().Name}).");
+            Environment.ExitCode = 1;
+        }
+
         _snapHitTestSpikeWindow?.Dispose();
         _productWindow?.Dispose();
         base.OnExit(e);
@@ -47,18 +108,12 @@ public partial class App : Application
     /// Shows the product window and pumps its messages on this thread. The loop ends when the window
     /// is destroyed, which only happens after the close confirmation was answered.
     /// </summary>
-    private void ShowProductWindow()
+    private void ShowProductWindow(SessionStatusVisual status, string sessionLabel)
     {
-        SessionStatusVisual status = SessionStatusVisuals.Describe(
-            SessionState.Starting,
-            AuthTier.HelloEnrolled,
-            GateStrength.Strong,
-            null);
-
         _productWindow = ProductWindow.Create(
             ProductWindowWidth,
             ProductWindowHeight,
-            SessionStatusVisuals.BuildTitle("example-session"),
+            SessionStatusVisuals.BuildTitle(sessionLabel),
             ConfirmClose,
             status);
 
@@ -74,6 +129,26 @@ public partial class App : Application
         ProductWindow window = _productWindow
             ?? throw new InvalidOperationException("The close confirmation was asked without a product window.");
         return CloseConfirmationDialog.Confirm(window.Handle, CloseConfirmationConfig.Default);
+    }
+
+    private static bool IsAttachFailure(Exception error)
+    {
+        return error is SessionOwnerException
+            or SessionOperationException
+            or InvalidOperationException
+            or ArgumentException
+            or IOException
+            or TimeoutException
+            or UnauthorizedAccessException;
+    }
+
+    private static void ShowStartupError(string message)
+    {
+        _ = MessageBox.Show(
+            message,
+            "SoulComputerUse",
+            MessageBoxButton.OK,
+            MessageBoxImage.Error);
     }
 
     /// <summary>

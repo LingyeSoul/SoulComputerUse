@@ -12,6 +12,7 @@
     <ProjectReference Include="..\..\src\SoulComputerUse.Cli\SoulComputerUse.Cli.csproj" />
     <ProjectReference Include="..\..\src\SoulComputerUse.Core\SoulComputerUse.Core.csproj" />
     <ProjectReference Include="..\..\src\SoulComputerUse.Mcp\SoulComputerUse.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\SoulComputerUse.SessionAgent\SoulComputerUse.SessionAgent.csproj" />
     <ProjectReference Include="..\..\src\SoulComputerUse.Windows\SoulComputerUse.Windows.csproj" />
   </ItemGroup>
 
