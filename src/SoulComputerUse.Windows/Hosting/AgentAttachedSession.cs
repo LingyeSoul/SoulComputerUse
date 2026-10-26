@@ -1,9 +1,13 @@
 using System;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Ipc.Agent;
+using SoulComputerUse.Windows.Native;
+using SoulComputerUse.Windows.SessionLifecycle;
+using SoulComputerUse.Windows.SessionLifecycle.Teardown;
 
 namespace SoulComputerUse.Windows.Hosting;
 
@@ -16,6 +20,7 @@ public sealed class AgentAttachedSession : IAsyncDisposable
 {
     private readonly AgentPipeClient _client;
     private readonly SessionOwnerService _owner;
+    private bool _childSessionsOpenedByUs;
     private bool _started;
     private bool _disposed;
 
@@ -65,9 +70,23 @@ public sealed class AgentAttachedSession : IAsyncDisposable
     /// Starts the owner pipe, reads the agent's status and moves the owner record through
     /// <c>connecting</c> to <c>ready</c>. A failure cleans up both halves before it is rethrown.
     /// </summary>
+    /// <remarks>
+    /// The work runs on the thread pool on purpose: the owner pipe client and the WPF dispatcher both
+    /// use a synchronization context, so awaiting them on the dispatcher thread while blocking on the
+    /// result would deadlock. Callers that are already asynchronous should use
+    /// <see cref="StartAsync"/> instead.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The session was already started or the agent is not ready.</exception>
     /// <exception cref="SessionOperationException">The agent pipe or the owner pipe failed.</exception>
     public void Start()
+    {
+        Task.Run(() => StartAsync()).GetAwaiter().GetResult();
+    }
+
+    /// <summary>The asynchronous form of <see cref="Start"/>.</summary>
+    /// <exception cref="InvalidOperationException">The session was already started or the agent is not ready.</exception>
+    /// <exception cref="SessionOperationException">The agent pipe or the owner pipe failed.</exception>
+    public async Task StartAsync()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_started)
@@ -78,7 +97,7 @@ public sealed class AgentAttachedSession : IAsyncDisposable
         _owner.Start();
         try
         {
-            SessionStatus status = _client.GetStatusAsync(default).GetAwaiter().GetResult();
+            SessionStatus status = await _client.GetStatusAsync(CancellationToken.None).ConfigureAwait(false);
             status.Validate();
             if (!string.Equals(status.State, "ready", StringComparison.Ordinal))
             {
@@ -106,8 +125,8 @@ public sealed class AgentAttachedSession : IAsyncDisposable
         }
         catch
         {
-            _owner.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            _client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            await _owner.DisposeAsync().ConfigureAwait(false);
+            await _client.DisposeAsync().ConfigureAwait(false);
             throw;
         }
     }
@@ -123,5 +142,71 @@ public sealed class AgentAttachedSession : IAsyncDisposable
         _disposed = true;
         await _owner.DisposeAsync().ConfigureAwait(false);
         await _client.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Marks that this session turned the machine-wide child-session switch on, so the shutdown plan
+    /// includes restoring it. A session that merely found the switch already on must not call this.
+    /// </summary>
+    public void MarkChildSessionsOpenedByUs()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _childSessionsOpenedByUs = true;
+    }
+
+    /// <summary>
+    /// Runs the contract's shutdown sequence: enter <c>closing</c>, log the child session off, restore
+    /// the switch only when this session opened it, release the lock, then let the caller exit.
+    /// </summary>
+    /// <remarks>
+    /// A failed step never stops the sequence, and the returned report carries the non-zero exit code
+    /// the caller must use. This method never ends the process itself.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The session was not started.</exception>
+    public async Task<int> CloseAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_started)
+        {
+            throw new InvalidOperationException("The attached session has not started, so it has nothing to shut down.");
+        }
+
+        int childSessionId = _owner.SubagentWtsSessionId;
+        if (childSessionId > 0)
+        {
+            // Logging off the console session would sign the operator out of their own desktop, which is
+            // unrecoverable. A recorded child id equal to the console id therefore means the id was
+            // obtained wrongly, and the shutdown is refused before any destructive step runs.
+            int consoleSessionId = WtsSessionProbe.GetActiveConsoleSessionId();
+            if (childSessionId == consoleSessionId)
+            {
+                throw new InvalidOperationException(
+                    "The recorded child session id is the active console session id, so logging it off would sign the operator out. The shutdown is refused.");
+            }
+        }
+
+        SessionShutdownRequest request = new(
+            ChildSessionsOpenedByUs: _childSessionsOpenedByUs,
+            ChildSessionNeedsLogOff: childSessionId > 0,
+            LockIsHeld: true);
+        SessionShutdownPlan plan = SessionShutdown.Plan(request);
+        SessionTeardownContext context = new(
+            childSessionId > 0 ? childSessionId : null,
+            _childSessionsOpenedByUs,
+            LockIsHeld: true,
+            ProcessExitRequested: true);
+
+        SessionTeardownExecutor executor = new(
+            new OwnerStateTransition(_owner),
+            new WtsChildSessionLogOff(new WtsSessionTable()),
+            new ChildSessionsSwitchRestore(),
+            new OwnerLockRelease(_owner));
+
+        SessionTeardownReport report = await executor.ExecuteAsync(plan, context, cancellationToken).ConfigureAwait(false);
+
+        // The child session is gone or the logoff was refused; either way the agent pipe can no longer
+        // carry a valid session, so it is closed after the plan rather than before the logoff.
+        await _client.DisposeAsync().ConfigureAwait(false);
+        return report.ExitCode;
     }
 }

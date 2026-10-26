@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
 using SoulComputerUse.Core.Protocol;
@@ -55,8 +57,7 @@ public partial class App : Application
             {
                 _attachedSession = AgentAttachedSession.CreateForCurrentProcess(options.SessionId, options.Nonce);
                 _attachedSession.Start();
-            }
-            catch (Exception error) when (IsAttachFailure(error))
+            }            catch (Exception error) when (IsAttachFailure(error))
             {
                 ShowStartupError(error.Message);
                 Shutdown(1);
@@ -68,6 +69,11 @@ public partial class App : Application
             SessionState state = SessionStateNames.FromWireName(status.State);
             SessionStatusVisual visual = SessionStatusVisuals.Describe(state, status.AuthTier, status.GateStrength, null);
             ShowProductWindow(visual, "session");
+
+            // The window is destroyed only after the operator confirmed the close, so the contract's
+            // teardown sequence runs here rather than in OnExit: entering closing, logging the child
+            // session off and releasing the lock must happen while the process still owns them.
+            RunAttachedTeardown();
         }
         else
         {
@@ -102,6 +108,34 @@ public partial class App : Application
         _snapHitTestSpikeWindow?.Dispose();
         _productWindow?.Dispose();
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Runs the attached session's shutdown sequence and records the contract exit code. A failed step
+    /// is reported through the exit code; the cleanup in <see cref="OnExit"/> still runs afterwards and
+    /// is idempotent.
+    /// </summary>
+    private void RunAttachedTeardown()
+    {
+        if (_attachedSession is null)
+        {
+            return;
+        }
+
+        try
+        {
+            int exitCode = Task.Run(() => _attachedSession.CloseAsync(CancellationToken.None)).GetAwaiter().GetResult();
+            if (exitCode != 0)
+            {
+                Console.Error.WriteLine("E_TEARDOWN The session could not be shut down cleanly.");
+                Environment.ExitCode = exitCode;
+            }
+        }
+        catch (Exception error) when (IsAttachFailure(error))
+        {
+            Console.Error.WriteLine($"E_TEARDOWN The session shutdown failed ({error.GetType().Name}).");
+            Environment.ExitCode = 1;
+        }
     }
 
     /// <summary>
@@ -144,6 +178,15 @@ public partial class App : Application
 
     private static void ShowStartupError(string message)
     {
+        // The message is only useful where somebody can read it. A double-clicked WinExe has neither a
+        // console nor a redirected handle, so it gets a dialog; any console, pipe or file reader gets the
+        // text on the error stream and the process exits with the failure code instead of blocking.
+        if (HostConsole.HasUsableErrorStream())
+        {
+            Console.Error.WriteLine(message);
+            return;
+        }
+
         _ = MessageBox.Show(
             message,
             "SoulComputerUse",

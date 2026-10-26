@@ -2,29 +2,39 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Security.AccessControl;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.Windows.Ipc;
 
 /// <summary>
-/// The owner side of the CLI/MCP to owner pipe. It accepts connections, reads one JSON frame per line,
-/// runs each request through the injected <see cref="ISessionToolHandler"/> and writes one JSON
-/// response per line.
+/// The owner side of the CLI/MCP to owner pipe. It accepts connections, verifies that each peer runs
+/// under the current Windows account, reads one JSON frame per line, runs each request through the
+/// injected <see cref="ISessionToolHandler"/> and writes one JSON response per line.
 /// </summary>
 /// <remarks>
 /// The pipe name is <see cref="IpcPipeNames.Owner"/> in production. The contract's
 /// <c>SoulComputerUse.agent.{sessionId}</c> pipe belongs to the host to child-session agent hop and is a
 /// different transport; this type never uses it.
 /// <para>
-/// Security status: the pipe is created with the process default security descriptor and this
-/// milestone does <b>not</b> apply an explicit DACL and does <b>not</b> verify the peer's PID or SID.
-/// Section 4 of the contract's DACL plus peer-SID check is a separate security gate that is not
-/// implemented here; it must not be claimed as done.
+/// Each instance is created with the explicit DACL from <see cref="OwnerPipeSecurity"/>: only the
+/// current user and LocalSystem hold <c>FullControl</c>, and no rule is inherited. After a connection
+/// is accepted the server reads the client process id and compares its token user SID with the current
+/// user SID; a peer that differs, or whose identity cannot be read, receives one <c>E_IPC_PEER</c>
+/// refusal and its connection is closed without serving any request. A line longer than
+/// <see cref="OwnerPipeLimits.MaximumFrameBytes"/> receives one <c>E_IPC_PROTOCOL</c> refusal and the
+/// connection is closed.
+/// </para>
+/// <para>
+/// The account check proves only that the peer runs under the same Windows account. It does not prove
+/// that the peer is this product's owner client, and another process of the same account can still
+/// connect; that is the known boundary of the owner SID model and this type does not claim more.
 /// </para>
 /// <para>
 /// One connection may carry many requests. Requests inside a connection are handled concurrently and
@@ -44,6 +54,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly object _gate = new();
     private readonly List<Task> _connections = [];
+    private NamedPipeServerStream? _listeningPipe;
     private Task? _acceptLoop;
     private bool _started;
     private bool _disposed;
@@ -64,6 +75,11 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
     /// Starts accepting connections and returns the accept loop. The loop runs until the caller's token
     /// is cancelled or the server is disposed, then it stops accepting and waits for live connections.
     /// </summary>
+    /// <remarks>
+    /// The first pipe instance is created before this method returns, so a caller may connect as soon
+    /// as it returns and a caller may read the DACL of the waiting instance. A failure to create that
+    /// instance is thrown here rather than reported through the returned task.
+    /// </remarks>
     public Task RunAsync(CancellationToken cancellationToken)
     {
         lock (_gate)
@@ -75,9 +91,30 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                 throw new InvalidOperationException("The session pipe server was already started.");
             }
 
+            NamedPipeServerStream first = CreatePipe();
             _started = true;
-            _acceptLoop = AcceptLoopAsync(cancellationToken);
+            _acceptLoop = AcceptLoopAsync(first, cancellationToken);
             return _acceptLoop;
+        }
+    }
+
+    /// <summary>
+    /// Reads the DACL of the pipe instance that is waiting for a connection. The returned object is
+    /// read back from the live pipe handle, not the descriptor the instance was created from.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No pipe instance is currently waiting for a connection.</exception>
+    public PipeSecurity ReadAccessControl()
+    {
+        lock (_gate)
+        {
+            NamedPipeServerStream? pipe = _listeningPipe;
+            if (pipe is null)
+            {
+                throw new InvalidOperationException(
+                    "The owner pipe server has no instance waiting for a connection, so its DACL cannot be read.");
+            }
+
+            return pipe.GetAccessControl();
         }
     }
 
@@ -118,45 +155,88 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         _shutdown.Dispose();
     }
 
-    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
+    private async Task AcceptLoopAsync(NamedPipeServerStream first, CancellationToken cancellationToken)
     {
         using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
         CancellationToken token = linked.Token;
 
-        while (!token.IsCancellationRequested)
+        NamedPipeServerStream? pending = first;
+        try
         {
-            NamedPipeServerStream stream = CreatePipe();
-            try
+            while (!token.IsCancellationRequested)
             {
-                await stream.WaitForConnectionAsync(token);
-            }
-            catch (OperationCanceledException)
-            {
-                await stream.DisposeAsync();
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                await stream.DisposeAsync();
-                break;
-            }
+                NamedPipeServerStream stream = pending ?? CreatePipe();
+                pending = null;
 
-            Task connection = RunConnectionAsync(stream, token);
-            lock (_gate)
+                bool connected = false;
+                try
+                {
+                    await stream.WaitForConnectionAsync(token);
+                    connected = true;
+                }
+                catch (Exception error) when (error is OperationCanceledException or ObjectDisposedException)
+                {
+                    return;
+                }
+                finally
+                {
+                    if (!connected)
+                    {
+                        ClearListeningPipe(stream);
+                        await stream.DisposeAsync();
+                    }
+                }
+
+                ClearListeningPipe(stream);
+                Task connection = RunConnectionAsync(stream, token);
+                lock (_gate)
+                {
+                    _connections.Add(connection);
+                }
+            }
+        }
+        finally
+        {
+            if (pending is not null)
             {
-                _connections.Add(connection);
+                ClearListeningPipe(pending);
+                await pending.DisposeAsync();
             }
         }
     }
 
     private NamedPipeServerStream CreatePipe()
     {
-        return new NamedPipeServerStream(
+        // The buffer sizes stay at the platform defaults, as they were before the explicit DACL.
+        NamedPipeServerStream stream = NamedPipeServerStreamAcl.Create(
             _pipeName,
             PipeDirection.InOut,
             MaxInstances,
             PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
+            PipeOptions.Asynchronous,
+            0,
+            0,
+            OwnerPipeSecurity.Create(),
+            HandleInheritability.None,
+            (PipeAccessRights)0);
+
+        lock (_gate)
+        {
+            _listeningPipe = stream;
+        }
+
+        return stream;
+    }
+
+    private void ClearListeningPipe(NamedPipeServerStream stream)
+    {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_listeningPipe, stream))
+            {
+                _listeningPipe = null;
+            }
+        }
     }
 
     private async Task RunConnectionAsync(NamedPipeServerStream stream, CancellationToken token)
@@ -165,6 +245,11 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         {
             try
             {
+                if (!await TryVerifyPeerAsync(stream, token))
+                {
+                    return;
+                }
+
                 await HandleConnectionAsync(stream, token);
             }
             catch (IOException)
@@ -182,9 +267,27 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Verifies that the connected client runs under the current account. A failure is answered with
+    /// one uncorrelated <c>E_IPC_PEER</c> frame and the connection is closed without reading a request.
+    /// </summary>
+    private static async Task<bool> TryVerifyPeerAsync(NamedPipeServerStream stream, CancellationToken token)
+    {
+        try
+        {
+            OwnerPipePeer.EnsureClientIsSameUser(stream);
+            return true;
+        }
+        catch (SessionOperationException error)
+        {
+            await TryWriteAsync(stream, OwnerPipeRefusals.Peer(error.Message), token);
+            return false;
+        }
+    }
+
     private async Task HandleConnectionAsync(NamedPipeServerStream stream, CancellationToken token)
     {
-        using StreamReader reader = new(stream, Utf8WithoutBom, detectEncodingFromByteOrderMarks: false, StreamBufferSize, leaveOpen: true);
+        OwnerFrameReader reader = new(stream);
         using StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
         {
             AutoFlush = false,
@@ -196,13 +299,20 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
 
         while (!token.IsCancellationRequested)
         {
-            string? line = await reader.ReadLineAsync(token);
-            if (line is null)
+            OwnerFrameReadResult read = await reader.ReadLineAsync(token);
+            if (read.Status == OwnerFrameReadStatus.EndOfStream)
             {
                 break;
             }
 
-            IpcFrameParseResult parsed = IpcFrameCodec.Parse(line);
+            if (read.Status == OwnerFrameReadStatus.FrameTooLong)
+            {
+                // The line was refused while it was being read, so no request id can be recovered.
+                await TryWriteAsync(writer, writeGate, OwnerPipeRefusals.FrameTooLong(), token);
+                return;
+            }
+
+            IpcFrameParseResult parsed = IpcFrameCodec.Parse(read.Line);
             switch (parsed.Kind)
             {
                 case IpcFrameKind.Request:
@@ -299,6 +409,29 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException)
         {
             // The client closed its side while the answer was being written; this connection is done.
+        }
+    }
+
+    /// <summary>
+    /// Writes one refusal to a peer that has not sent a request frame, so a writer per connection is
+    /// created here instead of being shared with the request loop.
+    /// </summary>
+    private static async Task TryWriteAsync(NamedPipeServerStream stream, IpcResponse response, CancellationToken token)
+    {
+        try
+        {
+            using StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
+            {
+                AutoFlush = false,
+                NewLine = "\n",
+            };
+
+            await writer.WriteLineAsync(IpcFrameCodec.WriteResponse(response).AsMemory(), token);
+            await writer.FlushAsync(token);
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            // The refused peer already closed its side; the connection closes either way.
         }
     }
 

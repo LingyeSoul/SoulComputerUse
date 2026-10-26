@@ -59,11 +59,13 @@ SoulComputerUse.Host.exe --attach-agent <uuid> --agent-nonce <32-hex>
 
 ## 5. 当前未完成项
 
-- Host 还没有通过 RDP alternate shell 自动拉起代理；当前必须在子会话内手动运行代理。
+- Host 还没有通过 RDP alternate shell 自动拉起代理；alternate shell 的命令行拼装与控制属性写入（含回读校验）已在 `Rdp/Launch` 实现，但尚未接入 Host 的连接流程。当前必须在子会话内手动运行代理。
 - 代理的 `authTier` 来自启动参数，尚未在代理侧重新探测 Hello/交互式登录事实。
-- owner 管道仍使用默认 ACL，未实现显式 DACL、对端 PID/SID 校验、nonce 或心跳。
+- owner 管道已使用显式 DACL（仅当前用户与 LocalSystem），并做双向对端 SID 校验与 8 MiB 单帧上限；仍没有 nonce、心跳与消息加密。
 - agent 管道的跨账户 DACL、真实子会话、安全桌面/锁定桌面尚未实测。
-- 关闭时不会主动结束子会话；宿主退出后由用户注销子会话。
+- 关闭流程已接入 Host：确认关闭后进入 closing、注销子会话、关回开关（仅当本会话开启过）、释放锁；但子会话开关的开启路径尚未实现，因此 `childSessionsOpenedByUs` 目前恒为 false。
+- 真实注销子会话与真实关回开关均未在真机验证；测试只用假会话表与假开关。
+- 结束会话时不会主动结束子会话之外的任何会话；注销目标只允许本产品子会话。
 
 ## 6. 手动验收步骤
 

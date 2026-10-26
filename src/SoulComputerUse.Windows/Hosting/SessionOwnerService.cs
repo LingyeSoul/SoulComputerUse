@@ -20,9 +20,10 @@ namespace SoulComputerUse.Windows.Hosting;
 /// A record write failure releases the lock immediately; a pipe startup failure deletes the record
 /// and releases the lock. The service never keeps the lock while it has no ownership record.
 /// <para>
-/// The pipe is a <see cref="NamedPipeSessionServer"/> and therefore uses the process default security
-/// descriptor. This type does not apply an explicit DACL and does not verify the peer PID or SID;
-/// section 4's DACL and peer check remain a separate security gate and must not be claimed as done.
+/// The pipe is a <see cref="NamedPipeSessionServer"/>, so the owner pipe applies an explicit DACL that
+/// allows only the current user and LocalSystem, and both ends verify that the peer process runs under
+/// the current user's SID. That check proves the peer is the same account; it does not prove the peer is
+/// this product, so a hostile process under the same account can still connect.
 /// </para>
 /// <para>
 /// The service writes no log entries. Its messages name records and pipes by type or by their
@@ -136,6 +137,18 @@ public sealed class SessionOwnerService : IAsyncDisposable
             lock (_gate)
             {
                 return _state;
+            }
+        }
+    }
+
+    /// <summary>The child WTS session id recorded in the ownership record, or zero when none was set.</summary>
+    public int SubagentWtsSessionId
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _subagentWtsSessionId;
             }
         }
     }

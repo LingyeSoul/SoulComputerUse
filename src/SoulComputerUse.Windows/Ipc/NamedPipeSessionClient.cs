@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.Windows.Ipc;
 
@@ -25,8 +26,16 @@ namespace SoulComputerUse.Windows.Ipc;
 /// without their answers crossing. Event frames, such as the agent's heartbeat, are read and ignored.
 /// </para>
 /// <para>
-/// Security status: this client does not verify the owner's PID or SID. Section 4's peer check is a
-/// separate security gate that is not implemented in this milestone.
+/// After connecting, the client reads the server process id from its own handle and compares that
+/// process token's user SID with the current user SID; a mismatch, or an identity that cannot be read,
+/// closes the connection and fails the call with <c>E_IPC_PEER</c>. A response line longer than
+/// <see cref="OwnerPipeLimits.MaximumFrameBytes"/> fails with <c>E_IPC_PROTOCOL</c> and breaks the
+/// connection instead of being buffered in full.
+/// </para>
+/// <para>
+/// The account check proves only that the server runs under the same Windows account. It does not prove
+/// that the server is this product's owner process: another process of the same account can serve the
+/// pipe, which is the known boundary of the owner SID model.
 /// </para>
 /// </remarks>
 public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
@@ -267,7 +276,19 @@ public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
                 throw SessionIpcRules.Disconnected(_pipeName);
             }
 
-            StreamReader reader = new(stream, Utf8WithoutBom, detectEncodingFromByteOrderMarks: false, StreamBufferSize, leaveOpen: true);
+            try
+            {
+                OwnerPipePeer.EnsureServerIsSameUser(stream);
+            }
+            catch (SessionOperationException peerError)
+            {
+                // The connected server is not this account's process. The connection is closed and the
+                // client stays failed instead of trying again against a possibly hostile endpoint.
+                await stream.DisposeAsync();
+                MarkBroken(peerError);
+                throw;
+            }
+
             StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
             {
                 AutoFlush = false,
@@ -278,7 +299,7 @@ public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
             {
                 _stream = stream;
                 _writer = writer;
-                _readerLoop = ReadLoopAsync(reader);
+                _readerLoop = ReadLoopAsync(stream);
             }
         }
         finally
@@ -287,21 +308,28 @@ public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
         }
     }
 
-    private async Task ReadLoopAsync(StreamReader reader)
+    private async Task ReadLoopAsync(Stream stream)
     {
+        OwnerFrameReader reader = new(stream);
         CancellationToken token = _lifetime.Token;
         SessionOperationException reason = SessionIpcRules.Disconnected(_pipeName);
+        bool breakConnection = false;
         try
         {
             while (!token.IsCancellationRequested)
             {
-                string? line = await reader.ReadLineAsync(token);
-                if (line is null)
+                OwnerFrameReadResult read = await reader.ReadLineAsync(token);
+                if (read.Status == OwnerFrameReadStatus.EndOfStream)
                 {
                     break;
                 }
 
-                IpcFrameParseResult parsed = IpcFrameCodec.Parse(line);
+                if (read.Status == OwnerFrameReadStatus.FrameTooLong)
+                {
+                    throw SessionIpcRules.Protocol(OwnerPipeLimits.ExceededMessage);
+                }
+
+                IpcFrameParseResult parsed = IpcFrameCodec.Parse(read.Line);
                 switch (parsed.Kind)
                 {
                     case IpcFrameKind.Response:
@@ -329,10 +357,33 @@ public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
             reason = SessionIpcRules.Protocol(error.Message);
             MarkBroken(reason);
         }
+        catch (SessionOperationException error)
+        {
+            // The line crossed the frame limit: the connection is broken instead of being read further.
+            reason = error;
+            MarkBroken(error);
+            breakConnection = true;
+        }
         finally
         {
-            reader.Dispose();
+            if (breakConnection)
+            {
+                BreakConnection(stream);
+            }
+
             FailPending(reason);
+        }
+    }
+
+    private static void BreakConnection(Stream stream)
+    {
+        try
+        {
+            stream.Dispose();
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException)
+        {
+            // Closing a pipe that the owner already closed is not a failure of this client.
         }
     }
 
