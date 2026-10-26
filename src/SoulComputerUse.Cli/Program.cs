@@ -1,16 +1,36 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
+using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Cli;
 
 /// <summary>
-/// Entry point of the long-lived CLI adapter. The REPL lands with milestone M2;
-/// the skeleton only proves that this component builds and links against Core.
+/// Entry point of the CLI adapter. It connects to the session owner over the contract's named pipe.
+/// No arguments opens the prompt, and one command runs once and exits.
 /// </summary>
 internal static class Program
 {
-    private static int Main(string[] args)
+    private static async Task<int> Main(string[] args)
     {
-        Console.Error.WriteLine($"SoulComputerUse.Cli is not implemented yet; argument count = {args.Length}.");
-        return 1;
+        await using NamedPipeSessionClient client = new();
+        CliRunner runner = new(client, Console.In, Console.Out, Console.Error);
+
+        try
+        {
+            if (args.Length == 0)
+            {
+                return await runner.RunReplAsync(CancellationToken.None);
+            }
+
+            return await runner.RunSingleAsync(args, CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            // This is the process boundary, not a recovery path: it keeps a stack trace, whose
+            // absolute paths the log whitelist forbids, away from the error stream.
+            Console.Error.WriteLine($"E_IPC_PROTOCOL The CLI stopped unexpectedly ({error.GetType().Name}).");
+            return 1;
+        }
     }
 }
