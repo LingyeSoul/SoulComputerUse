@@ -120,8 +120,9 @@ public static class AgentSessionRunner
         AgentLog.Write("information", "shell.started");
 
         DesktopSurface surface = new();
+        GuardedDesktopSurface guarded = new(surface, new BlockedGuard());
         DesktopSessionClient client = new(
-            surface,
+            guarded,
             options.SessionId,
             detected.Tier,
             detected.RequireStrength(),
