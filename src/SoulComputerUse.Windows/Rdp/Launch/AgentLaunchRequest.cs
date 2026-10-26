@@ -19,8 +19,8 @@ public sealed record AgentLaunchRequest(
     string WorkingDirectory,
     string SessionId,
     string Nonce,
-    AuthTier AuthTier,
-    GateStrength GateStrength)
+    AuthTier? AuthTier,
+    GateStrength? GateStrength)
 {
     /// <summary>
     /// Renders the request without the binding nonce and without either path, so that an accidental
@@ -28,7 +28,9 @@ public sealed record AgentLaunchRequest(
     /// </summary>
     public override string ToString()
     {
-        return $"session={SessionId} tier={AuthTier} strength={GateStrength}";
+        string tier = AuthTier is null ? "detected" : AuthTier.Value.ToString();
+        string strength = GateStrength is null ? "detected" : GateStrength.Value.ToString();
+        return $"session={SessionId} tier={tier} strength={strength}";
     }
 
     /// <summary>
@@ -43,8 +45,8 @@ public sealed record AgentLaunchRequest(
         string applicationDirectory,
         string sessionId,
         string nonce,
-        AuthTier authTier,
-        GateStrength gateStrength)
+        AuthTier? authTier,
+        GateStrength? gateStrength)
     {
         string executablePath = AgentExecutablePath.Resolve(applicationDirectory);
         string workingDirectory = Path.GetFullPath(applicationDirectory);

@@ -121,6 +121,47 @@ public sealed class AgentLaunchCommandLineTests
     }
 
     [TestMethod]
+    public void DeclaringNoTierProducesACommandLineTheAgentDetectsForItself()
+    {
+        string commandLine = AgentLaunchCommandLine.Build(
+            PlainExecutablePath,
+            SessionId,
+            Nonce,
+            null,
+            null);
+
+        Assert.AreEqual(
+            @"C:\app\SoulComputerUse.SessionAgent.exe --scu-bootstrap --session b3f1c2d4-5678-4abc-9def-0a1b2c3d4e5f --nonce 0123456789ABCDEF0123456789ABCDEF",
+            commandLine,
+            "A launcher that declares no tier must not put a tier on the command line, because the declaration is only a cross-check against the agent's own detection.");
+
+        string[] agentArguments = commandLine.Split(' ')[1..];
+        AgentOptions options = AgentCommandLine.Parse(agentArguments);
+        Assert.IsNull(options.AuthTier, "No declaration means the agent detects the tier for itself.");
+        Assert.IsNull(options.GateStrength);
+    }
+
+    [TestMethod]
+    public void ATierWithoutAStrengthIsRefused()
+    {
+        Assert.ThrowsExactly<ArgumentException>(
+            () => AgentLaunchCommandLine.Build(
+                PlainExecutablePath,
+                SessionId,
+                Nonce,
+                AuthTier.SystemCredential,
+                null));
+
+        Assert.ThrowsExactly<ArgumentException>(
+            () => AgentLaunchCommandLine.Build(
+                PlainExecutablePath,
+                SessionId,
+                Nonce,
+                null,
+                GateStrength.Login));
+    }
+
+    [TestMethod]
     public void TheNoneTierIsRefused()
     {
         ArgumentException error = Assert.ThrowsExactly<ArgumentException>(
@@ -190,8 +231,7 @@ public sealed class AgentLaunchCommandLineTests
     }
 
     [TestMethod]
-    public void TheLogDescriptionCarriesNoNonceNoPathAndNoFileName()
-    {
+    public void TheLogDescriptionCarriesNoNonceNoPathAndNoFileName()    {
         string description = AgentLaunchCommandLine.DescribeForLog(
             SessionId,
             AuthTier.SystemCredential,

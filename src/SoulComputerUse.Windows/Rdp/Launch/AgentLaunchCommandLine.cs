@@ -40,24 +40,51 @@ public static class AgentLaunchCommandLine
     /// <param name="executablePath">The agent executable as a complete absolute path.</param>
     /// <param name="sessionId">The session UUID in <c>D</c> format.</param>
     /// <param name="nonce">The 32-character hexadecimal binding nonce.</param>
-    /// <param name="authTier">The gate tier the agent must report; <see cref="AuthTier.None"/> is refused.</param>
-    /// <param name="gateStrength">The gate strength the contract pins to the tier.</param>
+    /// <param name="authTier">
+    /// The gate tier the launcher expects, or null to declare nothing. The agent detects the tier for
+    /// itself, so declaring nothing is the normal case; a declaration is only a cross-check.
+    /// </param>
+    /// <param name="gateStrength">The gate strength pinned to the tier, or null with a null tier.</param>
     /// <exception cref="ArgumentException">A value cannot appear on the command line as required.</exception>
     public static string Build(
         string executablePath,
         string sessionId,
         string nonce,
-        AuthTier authTier,
-        GateStrength gateStrength)
+        AuthTier? authTier,
+        GateStrength? gateStrength)
     {
         string commandExecutable = FormatExecutablePath(executablePath);
         string normalizedSessionId = NormalizeSessionId(sessionId);
         EnsureNonce(nonce);
-        string authTierName = AuthTierName(authTier);
-        string gateStrengthName = GateStrengthName(gateStrength);
-        EnsureConsistent(authTier, gateStrength);
 
-        return $"{commandExecutable} {BootstrapMarker} {SessionOption} {normalizedSessionId} {NonceOption} {nonce} {AuthTierOption} {authTierName} {GateStrengthOption} {gateStrengthName}";
+        string declaration = RenderDeclaration(authTier, gateStrength);
+        return $"{commandExecutable} {BootstrapMarker} {SessionOption} {normalizedSessionId} {NonceOption} {nonce}{declaration}";
+    }
+
+    /// <summary>
+    /// Renders the optional tier declaration. Declaring the tier is never how the gate is chosen: the
+    /// agent detects it and refuses a declaration that contradicts the detection, so a launcher that
+    /// declares a tier the machine cannot provide would stop the agent at startup. Omitting the
+    /// declaration is therefore the safe default.
+    /// </summary>
+    private static string RenderDeclaration(AuthTier? authTier, GateStrength? gateStrength)
+    {
+        if (authTier is null && gateStrength is null)
+        {
+            return string.Empty;
+        }
+
+        if (authTier is null || gateStrength is null)
+        {
+            throw new ArgumentException(
+                "The tier and the gate strength must be declared together or not at all.",
+                nameof(authTier));
+        }
+
+        string authTierName = AuthTierName(authTier.Value);
+        string gateStrengthName = GateStrengthName(gateStrength.Value);
+        EnsureConsistent(authTier.Value, gateStrength.Value);
+        return $" {AuthTierOption} {authTierName} {GateStrengthOption} {gateStrengthName}";
     }
 
     /// <summary>

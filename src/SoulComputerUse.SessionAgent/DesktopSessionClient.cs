@@ -18,15 +18,26 @@ public sealed class DesktopSessionClient : ISessionClient
     private readonly string _sessionId;
     private readonly AuthTier _authTier;
     private readonly GateStrength _gateStrength;
+    private readonly string? _helloHint;
 
     /// <summary>Creates one client over the child session's desktop surface.</summary>
+    /// <param name="surface">The desktop surface this child session serves.</param>
+    /// <param name="sessionId">The session UUID in <c>D</c> format.</param>
+    /// <param name="authTier">The tier the agent detected for itself; the refusal tier is rejected.</param>
+    /// <param name="gateStrength">The strength the contract pins to <paramref name="authTier"/>.</param>
+    /// <param name="helloHint">
+    /// The operator hint the detection produced, or null when it produced none. Only the
+    /// system-credential tier reports the hint, and its only defined value is the enumeration of
+    /// section 5.1.
+    /// </param>
     /// <exception cref="ArgumentNullException">The surface is null.</exception>
-    /// <exception cref="ArgumentException">The session id is empty or the authentication tier is none.</exception>
+    /// <exception cref="ArgumentException">The session id is empty, the tier is none, or the hint does not belong to the tier.</exception>
     public DesktopSessionClient(
         IDesktopSurface surface,
         string sessionId,
         AuthTier authTier,
-        GateStrength gateStrength)
+        GateStrength gateStrength,
+        string? helloHint)
     {
         ArgumentNullException.ThrowIfNull(surface);
         if (string.IsNullOrWhiteSpace(sessionId))
@@ -40,10 +51,20 @@ public sealed class DesktopSessionClient : ISessionClient
         }
 
         AuthTierRules.EnsureConsistent(authTier, gateStrength);
+        if (helloHint is not null
+            && (authTier != AuthTier.SystemCredential
+                || !string.Equals(helloHint, AgentAuthTier.HelloNotEnrolledHint, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                $"The operator hint belongs to the '{AuthTierNames.ToWireName(AuthTier.SystemCredential)}' tier only, and '{AgentAuthTier.HelloNotEnrolledHint}' is its only defined value.",
+                nameof(helloHint));
+        }
+
         _surface = surface;
         _sessionId = sessionId;
         _authTier = authTier;
         _gateStrength = gateStrength;
+        _helloHint = helloHint;
     }
 
     /// <inheritdoc />
@@ -57,7 +78,7 @@ public sealed class DesktopSessionClient : ISessionClient
             _authTier,
             _gateStrength,
             new SessionScreen(screen.Width, screen.Height),
-            null);
+            _helloHint);
         status.Validate();
         return Task.FromResult(status);
     }

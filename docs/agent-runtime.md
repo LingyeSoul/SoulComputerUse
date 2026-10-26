@@ -19,32 +19,34 @@ CLI / MCP ── SoulComputerUse.owner ── Host（owner，持单实例锁）
 
 ```text
 SoulComputerUse.SessionAgent.exe --scu-bootstrap --session <uuid> --nonce <32-hex>
-  --auth-tier <hello-enrolled|system-credential> --gate-strength <strong|login>
+  [--auth-tier <hello-enrolled|system-credential> --gate-strength <strong|login>]
 ```
 
 - `--session` 与 Host 的 `--attach-agent` 必须一致；它是 UUID `D` 格式，不是 Windows 会话号。
 - `--nonce` 必须与 Host 的 `--agent-nonce` 完全一致，32 个十六进制字符；不得写入日志或错误消息。
-- `--auth-tier` 与 `--gate-strength` 必须成对：`hello-enrolled/strong` 或 `system-credential/login`。
-- 代理不接收任何凭据；`none` 档拒绝启动。
+- 档位参数可省略，生产启动命令省略；代理在子会话内自行探测档位。若声明了档位，则必须成对（`hello-enrolled/strong` 或 `system-credential/login`）且与探测结果一致，否则以退出码 2 拒绝启动。
+- 代理不接收任何凭据；`none` 档拒绝启动（退出码 7）。
 
 ## 3. 代理自退闸与退出码
 
 | 退出码 | 含义 |
 |---|---|
 | 0 | 正常服务后宿主断开 |
-| 2 | 命令行非法 |
+| 2 | 命令行非法，或声明的档位与探测结果不一致 |
 | 3 | 命中身份闸：进程在操作员控制台会话 |
 | 4 | 管道、握手或系统依赖失败 |
 | 5 | 25 秒内没有 owner 记录，或 30 秒内没有被宿主认领 |
 | 6 | owner 记录不属于本会话、窗口站不是 `WinSta0\Default`，或记录已结束 |
+| 7 | 门禁探测结果为 `none`，按契约拒绝启动 |
 
 启动顺序：
 
 1. 身份闸：进程会话 ID 必须不同于活动控制台会话。
 2. 认领闸：读取当前用户的 owner 记录；记录不存在时最多等待 25 秒；`subagentWtsSessionId = 0` 时视为“等待宿主通过管道认领”。
 3. 窗口站闸：必须是 `WinSta0\Default`。
-4. 启动 explorer，然后开始监听 agent 管道。
-5. 30 秒内没有宿主完成 nonce 握手则退出。
+4. 门禁探测：Hello 已登记 → `hello-enrolled/strong`；否则有交互式登录令牌 → `system-credential/login`；否则 `none` 拒绝启动。探测失败按 fail-closed 处理。
+5. 启动 explorer，然后开始监听 agent 管道。
+6. 30 秒内没有宿主完成 nonce 握手则退出。
 
 ## 4. Host 附加模式
 
@@ -60,7 +62,7 @@ SoulComputerUse.Host.exe --attach-agent <uuid> --agent-nonce <32-hex>
 ## 5. 当前未完成项
 
 - Host 还没有通过 RDP alternate shell 自动拉起代理；alternate shell 的命令行拼装与控制属性写入（含回读校验）已在 `Rdp/Launch` 实现，但尚未接入 Host 的连接流程。当前必须在子会话内手动运行代理。
-- 代理的 `authTier` 来自启动参数，尚未在代理侧重新探测 Hello/交互式登录事实。
+- 代理已在子会话内自行探测档位；但 Hello 探测的系统判定尚未接入，当前注入的 Hello 事实恒为「不可用」，因此实际只会落入 `system-credential` 或 `none`，不会自报 `hello-enrolled`、也不会给出 `helloNotEnrolled`。
 - owner 管道已使用显式 DACL（仅当前用户与 LocalSystem），并做双向对端 SID 校验与 8 MiB 单帧上限；仍没有 nonce、心跳与消息加密。
 - agent 管道的跨账户 DACL、真实子会话、安全桌面/锁定桌面尚未实测。
 - 关闭流程已接入 Host：确认关闭后进入 closing、注销子会话、关回开关（仅当本会话开启过）、释放锁；但子会话开关的开启路径尚未实现，因此 `childSessionsOpenedByUs` 目前恒为 false。
@@ -70,7 +72,7 @@ SoulComputerUse.Host.exe --attach-agent <uuid> --agent-nonce <32-hex>
 ## 6. 手动验收步骤
 
 1. 构建：`dotnet build SoulComputerUse.slnx`。
-2. 在子会话内启动代理，传入会话 UUID、nonce、认证档与门禁强度。
+2. 在子会话内启动代理，只需传入会话 UUID 与 nonce（档位由代理自行探测）。
 3. 在控制台启动 Host 附加模式，传入同一个 UUID 与 nonce。
 4. 运行 `scu status`，应返回 `state=ready`、`sessionId`、`authTier`、`gateStrength` 与屏幕尺寸。
 5. 运行 `scu shot --out <临时文件>`，应得到子会话桌面的 PNG。

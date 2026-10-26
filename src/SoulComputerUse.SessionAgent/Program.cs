@@ -9,8 +9,9 @@ namespace SoulComputerUse.SessionAgent;
 
 /// <summary>
 /// The agent that runs inside the virtual desktop session. It refuses to run on the operator's
-/// console session, binds itself to the owner's child session, starts the desktop shell, and serves
-/// the secured agent pipe until the host disconnects or the unclaimed gate expires.
+/// console session, binds itself to the owner's child session, detects its own credential gate tier,
+/// starts the desktop shell, and serves the secured agent pipe until the host disconnects or the
+/// unclaimed gate expires.
 /// </summary>
 internal static class Program
 {
@@ -31,7 +32,9 @@ internal static class Program
 
         try
         {
-            return await AgentSessionRunner.RunAsync(options, CancellationToken.None);
+            return await AgentSessionRunner
+                .RunAsync(options, AgentHelloFacts.Unavailable, CancellationToken.None)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -43,6 +46,13 @@ internal static class Program
             AgentLog.Write("error", "agent.pipe_failed");
             Console.Error.WriteLine(error.Message);
             return AgentExitCode.StartFailure;
+        }
+        catch (AgentGateDeclarationException error)
+        {
+            // The declaration contradicted what this session detected. The runner already logged the
+            // mismatch; the message names the contradiction, never the values.
+            Console.Error.WriteLine(error.Message);
+            return AgentExitCode.InvalidArguments;
         }
         catch (Exception error) when (IsExpectedStartFailure(error))
         {

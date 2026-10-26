@@ -12,9 +12,23 @@ using SoulComputerUse.Windows.SingleInstance;
 namespace SoulComputerUse.SessionAgent;
 
 /// <summary>
-/// Runs the child-session agent: identity gate, claim gate, shell bootstrap, then one secured pipe
-/// connection that serves the desktop tools. It returns a process exit code for every gate verdict.
+/// Runs the child-session agent: identity gate, claim gate, window station gate, credential gate
+/// detection, shell bootstrap, then one secured pipe connection that serves the desktop tools. It
+/// returns a process exit code for every gate verdict.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The three self-exit gates of section 3.2 and the credential tier of section 7.2 are decided here,
+/// in that order, before the shell is started. Every gate fails closed: a fact that cannot be read
+/// ends the agent instead of being replaced by an assumption, because an agent that guessed its
+/// location or its gate would serve the wrong desktop under a false security claim.
+/// </para>
+/// <para>
+/// The credential tier is detected by this process, never taken from the command line. A launcher
+/// declaration only has to agree with the detection; a disagreement ends the agent, so a misreported
+/// gate can never reach <c>get_status</c>.
+/// </para>
+/// </remarks>
 public static class AgentSessionRunner
 {
     /// <summary>How long the agent waits to be claimed before it exits on its own.</summary>
@@ -26,11 +40,19 @@ public static class AgentSessionRunner
     private static readonly TimeSpan OwnerRecordPollInterval = TimeSpan.FromMilliseconds(500);
 
     /// <summary>Runs one agent with the parsed startup options.</summary>
+    /// <param name="options">The parsed startup configuration, including any optional declared gate values.</param>
+    /// <param name="helloFacts">The Windows Hello facts to detect the gate tier from.</param>
+    /// <param name="cancellationToken">Cancels the run; an observed cancellation is the caller's.</param>
     /// <exception cref="SessionOperationException">The pipe handshake or protocol failed.</exception>
-    /// <exception cref="InvalidOperationException">A system gate or the shell bootstrap failed.</exception>
-    public static async Task<int> RunAsync(AgentOptions options, CancellationToken cancellationToken)
+    /// <exception cref="InvalidOperationException">A system gate, the tier detection or the shell bootstrap failed.</exception>
+    /// <exception cref="ArgumentException">A declared gate value contradicts the detected tier.</exception>
+    public static async Task<int> RunAsync(
+        AgentOptions options,
+        AgentHelloFacts helloFacts,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(helloFacts);
 
         int processSessionId = WtsSessionProbe.GetCurrentProcessSessionId();
         int consoleSessionId = WtsSessionProbe.GetActiveConsoleSessionId();
@@ -51,25 +73,10 @@ public static class AgentSessionRunner
             throw new InvalidOperationException("The per-user ownership record store could not be resolved, so the agent cannot prove it was claimed.", error);
         }
 
-        SessionOwnerRecord? record = ReadRecord(store);
-        AgentClaimVerdict verdict = AgentClaimPolicy.Evaluate(record, options.SessionId, processSessionId);
-        if (verdict == AgentClaimVerdict.NoOwnerRecord)
+        int claimExitCode = await ApplyClaimGateAsync(store, options.SessionId, processSessionId, cancellationToken).ConfigureAwait(false);
+        if (claimExitCode != AgentExitCode.Success)
         {
-            AgentLog.Write("information", "gate.awaiting_owner");
-            record = await WaitForOwnerRecordAsync(store, cancellationToken).ConfigureAwait(false);
-            if (record is null)
-            {
-                AgentLog.Write("error", "gate.unclaimed");
-                return AgentExitCode.Unclaimed;
-            }
-
-            verdict = AgentClaimPolicy.Evaluate(record, options.SessionId, processSessionId);
-        }
-
-        if (verdict is AgentClaimVerdict.NoOwnerRecord or AgentClaimVerdict.WrongSession)
-        {
-            AgentLog.Write("error", "gate.wrong_session");
-            return AgentExitCode.WrongSession;
+            return claimExitCode;
         }
 
         if (!WindowStationProbe.IsInteractiveDesktop())
@@ -78,11 +85,47 @@ public static class AgentSessionRunner
             return AgentExitCode.WrongSession;
         }
 
+        AgentAuthTier detected;
+        try
+        {
+            detected = AgentAuthTierDetector.DetectFailClosed(
+                helloFacts.AvailableAndEnrolled,
+                helloFacts.HardwarePresentButNotEnrolled);
+        }
+        catch (InvalidOperationException)
+        {
+            AgentLog.Write("critical", "gate.auth_tier_probe_failed");
+            throw;
+        }
+
+        if (detected.RefusesStartup)
+        {
+            // The refusal tier is a startup refusal, not a degraded session: the contract forbids
+            // running without a gate, and the agent has no way to add one.
+            AgentLog.Write("error", "gate.auth_tier_none");
+            return AgentExitCode.AuthTierNone;
+        }
+
+        try
+        {
+            AgentCommandLine.EnsureDeclarationMatches(options, detected);
+        }
+        catch (AgentGateDeclarationException)
+        {
+            AgentLog.Write("error", "gate.auth_tier_mismatch");
+            throw;
+        }
+
         ShellBootstrap.StartExplorer();
         AgentLog.Write("information", "shell.started");
 
         DesktopSurface surface = new();
-        DesktopSessionClient client = new(surface, options.SessionId, options.AuthTier, options.GateStrength);
+        DesktopSessionClient client = new(
+            surface,
+            options.SessionId,
+            detected.Tier,
+            detected.RequireStrength(),
+            detected.HelloHint);
         SessionClientToolHandler handler = new(client);
         await using AgentPipeServer server = new(
             AgentPipeNames.ForSession(options.SessionId),
@@ -121,6 +164,57 @@ public static class AgentSessionRunner
         return AgentExitCode.Success;
     }
 
+    /// <summary>
+    /// Runs the claim gate. When no ownership record exists yet the agent waits for the host to write
+    /// one, because the alternate shell may start before the owner finishes writing. A wait that
+    /// times out is the only path that reports the unclaimed verdict from this gate.
+    /// </summary>
+    /// <returns><see cref="AgentExitCode.Success"/> when the gate passed, otherwise the exit code.</returns>
+    private static async Task<int> ApplyClaimGateAsync(
+        SessionOwnerStore store,
+        string expectedSessionId,
+        int processSessionId,
+        CancellationToken cancellationToken)
+    {
+        SessionOwnerRecord? record = ReadRecord(store);
+        AgentClaimDecision decision = AgentClaimPolicy.Decide(record, expectedSessionId, processSessionId);
+        if (decision.Verdict == AgentClaimVerdict.NoOwnerRecord)
+        {
+            // The record does not exist yet. This is the documented launch order, not a failed claim,
+            // so the wait is bounded by the contract's owner-record timeout instead of ending at once.
+            AgentLog.Write("information", AgentClaimLogEvents.OwnerRecordMissingWaiting);
+            record = await WaitForOwnerRecordAsync(store, cancellationToken).ConfigureAwait(false);
+            if (record is null)
+            {
+                // No record appeared within the timeout: no owner ever launched this agent.
+                AgentLog.Write("error", AgentClaimLogEvents.OwnerRecordWaitExpired);
+                return AgentExitCode.Unclaimed;
+            }
+
+            decision = AgentClaimPolicy.Decide(record, expectedSessionId, processSessionId);
+        }
+
+        if (decision.Verdict == AgentClaimVerdict.WrongSession)
+        {
+            // A record exists but does not bind this agent. This is a refusal, not a wait: waiting
+            // again would not change a record that already names something else.
+            AgentLog.Write("error", AgentClaimLogEvents.ForRefusal(decision.Reason));
+            return AgentExitCode.WrongSession;
+        }
+
+        // A pending host claim (zero child session id), a bound record and a claimed record all
+        // continue to the pipe, where the nonce handshake is the final claim.
+        AgentLog.Write("information", decision.Verdict == AgentClaimVerdict.PendingHostClaim
+            ? AgentClaimLogEvents.HostClaimPending
+            : AgentClaimLogEvents.Claimed);
+        return AgentExitCode.Success;
+    }
+
+    /// <summary>
+    /// Reads the ownership record, reporting an unreadable record as an explicit start failure. A
+    /// record that exists but cannot be read must never be treated as "no record", because the claim
+    /// gate would then wait for an owner that is already there.
+    /// </summary>
     private static SessionOwnerRecord? ReadRecord(SessionOwnerStore store)
     {
         try
@@ -175,4 +269,10 @@ public static class AgentExitCode
 
     /// <summary>The ownership record does not bind this agent to its child session.</summary>
     public const int WrongSession = 6;
+
+    /// <summary>
+    /// The detected credential gate tier refuses startup: the machine has neither an enrolled Hello
+    /// nor an interactive logon, so section 7.2 forbids running.
+    /// </summary>
+    public const int AuthTierNone = 7;
 }

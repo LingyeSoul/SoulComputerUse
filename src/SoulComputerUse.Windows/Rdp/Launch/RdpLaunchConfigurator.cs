@@ -39,6 +39,8 @@ public static class RdpLaunchConfigurator
         ArgumentNullException.ThrowIfNull(surface);
         ArgumentNullException.ThrowIfNull(request);
 
+        // The tier is detected inside the child session, so the production request declares none: a
+        // declaration that the machine contradicts would stop the agent at startup.
         string commandLine = AgentLaunchCommandLine.Build(
             request.ExecutablePath,
             request.SessionId,

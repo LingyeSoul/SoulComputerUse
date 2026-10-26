@@ -7,16 +7,22 @@ namespace SoulComputerUse.SessionAgent;
 /// The immutable startup configuration of one child-session agent. The nonce is the one-time binding
 /// value from the contract and must never be written to a log or echoed in an error.
 /// </summary>
+/// <remarks>
+/// <see cref="AuthTier"/> and <see cref="GateStrength"/> are the values the launcher declared, or
+/// null when it declared nothing. They are a cross-check only: the agent detects the tier for itself,
+/// and a declaration that contradicts the detection is refused rather than trusted. A value on the
+/// command line can therefore never become the gate the agent reports.
+/// </remarks>
 public sealed record AgentOptions(
     string SessionId,
     string Nonce,
-    AuthTier AuthTier,
-    GateStrength GateStrength);
+    AuthTier? AuthTier,
+    GateStrength? GateStrength);
 
 /// <summary>
 /// Parses the agent's startup command line. The parser is strict: it accepts exactly the bootstrap
-/// marker and the four contract values, rejects duplicates and unknown arguments, and never echoes a
-/// rejected nonce.
+/// marker, the session id, the binding nonce and the optional declared gate values, rejects
+/// duplicates and unknown arguments, and never echoes a rejected nonce.
 /// </summary>
 public static class AgentCommandLine
 {
@@ -98,34 +104,61 @@ public static class AgentCommandLine
             throw Invalid("The binding nonce must be 32 hexadecimal characters.");
         }
 
-        if (authTierText is null)
+        if (authTierText is null && gateStrengthText is null)
         {
-            throw Invalid("The agent command line is missing the authentication tier.");
+            return new AgentOptions(sessionGuid.ToString("D"), nonce, null, null);
         }
 
-        if (gateStrengthText is null)
-        {
-            throw Invalid("The agent command line is missing the gate strength.");
-        }
+        AuthTier? authTier = authTierText is null ? null : ParseAuthTier(authTierText);
+        GateStrength? gateStrength = gateStrengthText is null ? null : ParseGateStrength(gateStrengthText);
 
-        AuthTier authTier = ParseAuthTier(authTierText);
-        GateStrength gateStrength = ParseGateStrength(gateStrengthText);
-        try
+        if (authTier is not null && gateStrength is not null)
         {
-            AuthTierRules.EnsureConsistent(authTier, gateStrength);
-        }
-        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
-        {
-            throw Invalid("The authentication tier and gate strength do not belong together.");
+            try
+            {
+                AuthTierRules.EnsureConsistent(authTier.Value, gateStrength.Value);
+            }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+            {
+                throw Invalid("The declared authentication tier and the declared gate strength do not belong together.");
+            }
         }
 
         return new AgentOptions(sessionGuid.ToString("D"), nonce, authTier, gateStrength);
     }
 
+    /// <summary>
+    /// Checks the declared gate values against the tier the agent detected for itself. Every declared
+    /// value must agree with the detection, because a launcher that reports a gate the session does
+    /// not have would turn the gate into a claim instead of a fact.
+    /// </summary>
+    /// <param name="options">The parsed startup configuration with its optional declarations.</param>
+    /// <param name="detected">The tier this child session detected for itself.</param>
+    /// <exception cref="ArgumentNullException">A parameter is null.</exception>
+    /// <exception cref="AgentGateDeclarationException">A declared value contradicts the detection.</exception>
+    public static void EnsureDeclarationMatches(AgentOptions options, AgentAuthTier detected)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(detected);
+
+        if (options.AuthTier is not null && options.AuthTier.Value != detected.Tier)
+        {
+            throw new AgentGateDeclarationException(
+                "The declared authentication tier does not match the tier this child session detected, so the agent refuses to serve a gate the launcher misreported.");
+        }
+
+        if (options.GateStrength is not null && options.GateStrength.Value != detected.Strength)
+        {
+            // The refusal tier has no strength, so any declared strength contradicts it here.
+            throw new AgentGateDeclarationException(
+                "The declared gate strength does not match the strength of the tier this child session detected, so the agent refuses to serve a gate the launcher misreported.");
+        }
+    }
+
     /// <summary>Renders the fixed usage line. It carries no values from the command line.</summary>
     public static string Usage()
     {
-        return "Usage: agent --scu-bootstrap --session <uuid> --nonce <32-hex> --auth-tier <hello-enrolled|system-credential> --gate-strength <strong|login>";
+        return "Usage: agent --scu-bootstrap --session <uuid> --nonce <32-hex> [--auth-tier <hello-enrolled|system-credential>] [--gate-strength <strong|login>]";
     }
 
     private static string ReadValue(string[] args, ref int index, string option, string? existing)
