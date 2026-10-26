@@ -39,6 +39,22 @@ public partial class App : Application
 
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
+        if (NewSessionArguments.IsRequested(e.Args))
+        {
+            if (NewSessionArguments.HasExtraArguments(e.Args))
+            {
+                ShowStartupError(NewSessionArguments.Usage());
+                Shutdown(2);
+                return;
+            }
+
+            // The new-session mode creates an ActiveX control and pumps its window messages, so it runs on
+            // its own STA thread; the dispatcher only waits for the exit code.
+            int exitCode = NewSessionThread.Run(e.Args);
+            Shutdown(exitCode);
+            return;
+        }
+
         if (e.Args.Length > 0)
         {
             AttachedAgentOptions options;
@@ -176,8 +192,7 @@ public partial class App : Application
             or UnauthorizedAccessException;
     }
 
-    private static void ShowStartupError(string message)
-    {
+    internal static void ShowStartupError(string message)    {
         // The message is only useful where somebody can read it. A double-clicked WinExe has neither a
         // console nor a redirected handle, so it gets a dialog; any console, pipe or file reader gets the
         // text on the error stream and the process exits with the failure code instead of blocking.

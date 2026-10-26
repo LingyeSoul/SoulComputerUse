@@ -1,4 +1,6 @@
 using System;
+using System.Drawing;
+using System.Windows.Forms;
 
 namespace SoulComputerUse.Windows.Rdp.SessionLaunch;
 
@@ -9,24 +11,46 @@ namespace SoulComputerUse.Windows.Rdp.SessionLaunch;
 /// <remarks>
 /// <para>
 /// The control is created on the thread that creates this object, which must be an STA thread: an
-/// ActiveX control cannot be instantiated anywhere else. Reading <see cref="Ocx"/> forces the host to
-/// create the control, so a caller cannot reach the launch path with a control that was never attached.
+/// ActiveX control cannot be instantiated anywhere else.
 /// </para>
 /// <para>
-/// This type deliberately exposes no Windows Forms type in its public surface. The host process only
-/// needs the two values the launch path and the product window consume, and keeping the control host
-/// behind this type means the host project needs no Windows Forms reference of its own.
+/// An <c>AxHost</c> only creates its window once it has a parent control, so the host is sited in a hidden
+/// owner form whose handle is forced here. The product window then adopts the control's window with
+/// <c>SetParent</c>, which is why <see cref="WindowHandle"/> is the control's own handle and not the
+/// carrier's. Without the carrier the handle stays zero and the picture surface can never be attached.
+/// </para>
+/// <para>
+/// This type deliberately exposes no Windows Forms type in its public surface. The host process only needs
+/// the control object and the handle, and keeping the carrier behind this type means the host project needs
+/// no Windows Forms reference of its own.
 /// </para>
 /// </remarks>
 public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
 {
+    private readonly Form _carrier;
     private readonly RdpControlHost _control;
     private bool _disposed;
 
-    /// <summary>Creates the surface and one ActiveX host for the remote desktop control.</summary>
+    /// <summary>Creates the surface, its hidden carrier and one ActiveX host for the control.</summary>
     public RdpControlSurface()
     {
-        _control = new RdpControlHost();
+        _carrier = new Form
+        {
+            FormBorderStyle = FormBorderStyle.None,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Size = new Size(1, 1),
+            Visible = false,
+        };
+
+        _control = new RdpControlHost
+        {
+            Dock = DockStyle.Fill,
+        };
+        _carrier.Controls.Add(_control);
+
+        // The carrier is never shown, but its handle must exist before the control can create its own.
+        _ = _carrier.Handle;
     }
 
     /// <inheritdoc />
@@ -61,6 +85,20 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
         }
     }
 
+    /// <summary>
+    /// The client's own connected state: 0 idle, 1 connected, 2 connecting, 3 waiting for the operator to
+    /// log on. This is the value the logon gate reads, so it must come from the control and nowhere else.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The surface was already disposed.</exception>
+    public int ConnectedState
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _control.ConnectedState;
+        }
+    }
+
     /// <summary>Shows the control after the product window adopted it as its picture surface.</summary>
     /// <exception cref="ObjectDisposedException">The surface was already disposed.</exception>
     public void Show()
@@ -79,5 +117,6 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
 
         _disposed = true;
         _control.Dispose();
+        _carrier.Dispose();
     }
 }

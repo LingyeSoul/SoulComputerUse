@@ -10,6 +10,20 @@
   <ItemGroup>
     <ProjectReference Include="..\SoulComputerUse.Core\SoulComputerUse.Core.csproj" />
     <ProjectReference Include="..\SoulComputerUse.Windows\SoulComputerUse.Windows.csproj" />
+
+    <!-- Both executables are started from this program's own directory and never from PATH: the agent
+         becomes the child session's alternate shell, and the helper is the only program this product
+         elevates. Copying them beside the host is what makes that derivation true in a build output. -->
+    <ProjectReference Include="..\SoulComputerUse.SessionAgent\SoulComputerUse.SessionAgent.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <OutputItemType>Content</OutputItemType>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="..\SoulComputerUse.ChildSessionsHelper\SoulComputerUse.ChildSessionsHelper.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <OutputItemType>Content</OutputItemType>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </ProjectReference>
   </ItemGroup>
 
 </Project>
