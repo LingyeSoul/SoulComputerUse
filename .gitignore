@@ -63,3 +63,7 @@ desktop.ini
 # Local worktrees: they contain a full checkout and must never be committed
 /.worktrees/
 
+
+# Subagent-driven scratch: ledgers, briefs, review packages
+/.superpowers/
+
