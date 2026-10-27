@@ -105,6 +105,13 @@ public enum SessionErrorCode
     /// through; free-text reasons are not part of the contract.
     /// </summary>
     AgentError = 25,
+
+    /// <summary>
+    /// The host process could not be launched from the caller's environment: the host executable is
+    /// missing, the console session is not interactive, the caller is already elevated, process
+    /// creation failed, or the host exited before it took the lock.
+    /// </summary>
+    HostLaunchFailed = 26,
 }
 
 /// <summary>
@@ -443,6 +450,11 @@ public static class SessionErrorCatalog
                 true,
                 SessionErrorStateScope.ListedStates,
                 [SessionState.Ready]),
+            new SessionErrorRule(
+                SessionErrorCode.HostLaunchFailed,
+                false,
+                SessionErrorStateScope.ListedStates,
+                [SessionState.Starting]),
         ];
 
         return Array.AsReadOnly(rules);

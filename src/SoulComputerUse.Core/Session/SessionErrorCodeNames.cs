@@ -70,6 +70,7 @@ public static class SessionErrorCodeNames
             [SessionErrorCode.CoordOutOfRange] = "E_COORD_OUT_OF_RANGE",
             [SessionErrorCode.ScreenshotTooLarge] = "E_SCREENSHOT_TOO_LARGE",
             [SessionErrorCode.AgentError] = "E_AGENT_ERROR",
+            [SessionErrorCode.HostLaunchFailed] = "E_HOST_LAUNCH_FAILED",
         };
 
         if (wireNames.Count != Enum.GetValues<SessionErrorCode>().Length)

@@ -14,7 +14,7 @@ namespace SoulComputerUse.ContractTests;
 public sealed class SessionErrorTests
 {
     /// <summary>Section 2 of the interface contract lists exactly this many error codes.</summary>
-    private const int ContractCodeCount = 26;
+    private const int ContractCodeCount = 27;
 
     private static readonly string[] ExpectedWireNameOrder =
     [
@@ -44,6 +44,7 @@ public sealed class SessionErrorTests
         "E_COORD_OUT_OF_RANGE",
         "E_SCREENSHOT_TOO_LARGE",
         "E_AGENT_ERROR",
+        "E_HOST_LAUNCH_FAILED",
     ];
 
     private static readonly Dictionary<SessionErrorCode, string> ExpectedWireNames = new()
@@ -74,6 +75,7 @@ public sealed class SessionErrorTests
         [SessionErrorCode.CoordOutOfRange] = "E_COORD_OUT_OF_RANGE",
         [SessionErrorCode.ScreenshotTooLarge] = "E_SCREENSHOT_TOO_LARGE",
         [SessionErrorCode.AgentError] = "E_AGENT_ERROR",
+        [SessionErrorCode.HostLaunchFailed] = "E_HOST_LAUNCH_FAILED",
     };
 
     private static readonly Dictionary<SessionErrorCode, bool> ExpectedRetryable = new()
@@ -104,6 +106,7 @@ public sealed class SessionErrorTests
         [SessionErrorCode.CoordOutOfRange] = false,
         [SessionErrorCode.ScreenshotTooLarge] = false,
         [SessionErrorCode.AgentError] = true,
+        [SessionErrorCode.HostLaunchFailed] = false,
     };
 
     private static readonly Dictionary<SessionErrorCode, SessionState[]> ExpectedListedStates = new()
@@ -142,6 +145,7 @@ public sealed class SessionErrorTests
         [SessionErrorCode.CoordOutOfRange] = [SessionState.Ready, SessionState.Blocked],
         [SessionErrorCode.ScreenshotTooLarge] = [SessionState.Ready, SessionState.Blocked],
         [SessionErrorCode.AgentError] = [SessionState.Ready],
+        [SessionErrorCode.HostLaunchFailed] = [SessionState.Starting],
     };
 
     private static readonly HashSet<SessionErrorCode> ExpectedEveryStateCodes =
@@ -164,7 +168,7 @@ public sealed class SessionErrorTests
         Assert.HasCount(
             ContractCodeCount,
             Enum.GetValues<SessionErrorCode>(),
-            "Section 2 lists 26 codes; the enum must have one member per row and no more.");
+            "Section 2 lists 27 codes; the enum must have one member per row and no more.");
         Assert.HasCount(ContractCodeCount, SessionErrorCatalog.Rules, "The catalog must have one rule per row.");
         Assert.HasCount(ContractCodeCount, ExpectedWireNames, "The independent wire name table must cover every row.");
         Assert.HasCount(ContractCodeCount, ExpectedRetryable, "The independent retryable table must cover every row.");
@@ -490,5 +494,18 @@ public sealed class SessionErrorTests
                     () => new SessionError(code, "contract message", rule.Retryable, null));
             }
         }
+    }
+
+    [TestMethod]
+    public void TheHostLaunchFailureCodeIsPinnedAndNotRetryable()
+    {
+        Assert.AreEqual("E_HOST_LAUNCH_FAILED", SessionErrorCodeNames.ToWireName(SessionErrorCode.HostLaunchFailed));
+        Assert.AreEqual(SessionErrorCode.HostLaunchFailed, SessionErrorCodeNames.FromWireName("E_HOST_LAUNCH_FAILED"));
+        Assert.IsFalse(SessionErrorCatalog.IsRetryable(SessionErrorCode.HostLaunchFailed));
+        Assert.IsFalse(SessionErrorCatalog.IsAgentSelfExitOnly(SessionErrorCode.HostLaunchFailed));
+
+        SessionErrorRule rule = SessionErrorCatalog.For(SessionErrorCode.HostLaunchFailed);
+        Assert.IsTrue(rule.AllowsState(SessionState.Starting));
+        Assert.IsFalse(rule.AllowsState(SessionState.Ready));
     }
 }
