@@ -116,7 +116,44 @@ internal static class NativeMethods
     internal const int SmCyFullScreen = 17;
     internal const int ErrorAlreadyExists = 183;
     internal const int ErrorFileNotFound = 2;
+    internal const int ErrorAccessDenied = 5;
     internal const uint Synchronize = 0x00100000;
+
+    /// <summary><c>WAIT_OBJECT_0</c>: the waited-for object is signaled.</summary>
+    internal const uint WaitObjectZero = 0;
+
+    /// <summary><c>WAIT_TIMEOUT</c>: the zero-length wait found the object still unsignaled.</summary>
+    internal const uint WaitTimeout = 0x00000102;
+
+    /// <summary><c>CREATE_NEW_PROCESS_GROUP</c>: the child gets a process group of its own, so a console control event aimed at the caller's group does not reach it.</summary>
+    internal const uint CreateNewProcessGroup = 0x00000200;
+
+    /// <summary>
+    /// <c>CREATE_BREAKAWAY_FROM_JOB</c>: the child leaves the caller's job object, which is what keeps
+    /// a kill-on-close job from taking the child down with it. It is refused with
+    /// <see cref="ErrorAccessDenied"/> unless the job sets <c>JOB_OBJECT_LIMIT_BREAKAWAY_OK</c>.
+    /// </summary>
+    internal const uint CreateBreakawayFromJob = 0x01000000;
+
+    /// <summary><c>STARTF_USESHOWWINDOW</c>: <c>wShowWindow</c> applies.</summary>
+    internal const uint StartfUseShowWindow = 0x00000001;
+
+    /// <summary>
+    /// <c>STARTF_USESTDHANDLES</c>: the child's standard handles are exactly the ones in
+    /// <see cref="StartupInfo"/>. Without it, <c>CreateProcessW</c> copies the caller's standard
+    /// handles into the child even when <c>bInheritHandles</c> is <see langword="false"/>, and the
+    /// child then keeps the caller's pipe open.
+    /// </summary>
+    internal const uint StartfUseStdHandles = 0x00000100;
+
+    /// <summary>
+    /// <c>INVALID_HANDLE_VALUE</c>: the child gets no usable standard handle. Writing to such a stream
+    /// is silently discarded rather than raising an error.
+    /// </summary>
+    internal const nint InvalidHandleValue = -1;
+
+    /// <summary><c>SW_SHOWNORMAL</c>: the child's first window is shown at its normal size.</summary>
+    internal const short SwShowNormal = 1;
 
     [DllImport("user32.dll", EntryPoint = "RegisterClassExW", SetLastError = true, CharSet = CharSet.Unicode)]
     internal static extern ushort RegisterClassExW(ref WindowClassEx windowClass);
@@ -241,6 +278,37 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", EntryPoint = "GetExitCodeProcess", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetExitCodeProcess(nint process, out int exitCode);
+
+    /// <summary>
+    /// Creates a process. <paramref name="commandLine"/> must point at a writable, null-terminated
+    /// buffer for the duration of the call, because <c>CreateProcessW</c> may modify it in place;
+    /// callers marshal a copy with <c>Marshal.StringToHGlobalUni</c>.
+    /// </summary>
+    [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool CreateProcessW(
+        string? applicationName,
+        nint commandLine,
+        nint processAttributes,
+        nint threadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+        uint creationFlags,
+        nint environment,
+        string? currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    /// <summary>
+    /// Reports whether <paramref name="process"/> belongs to <paramref name="job"/>, or to any job when
+    /// <paramref name="job"/> is zero.
+    /// </summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsProcessInJob(nint process, nint job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+    /// <summary>The calling process's own pseudo-handle, which never needs closing.</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern nint GetCurrentProcess();
 
     [DllImport("shell32.dll", EntryPoint = "ShellExecuteExW", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -483,4 +551,38 @@ internal struct Msg
     internal uint Time;
     internal NativePoint Point;
     internal uint Private;
+}
+
+/// <summary>The <c>STARTUPINFOW</c> <c>CreateProcessW</c> takes. <see cref="Size"/> must be filled in.</summary>
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+internal struct StartupInfo
+{
+    internal int Size;
+    internal string? Reserved;
+    internal string? Desktop;
+    internal string? Title;
+    internal int X;
+    internal int Y;
+    internal int XSize;
+    internal int YSize;
+    internal int XCountChars;
+    internal int YCountChars;
+    internal int FillAttribute;
+    internal uint Flags;
+    internal short ShowWindow;
+    internal short Reserved2Size;
+    internal nint Reserved2;
+    internal nint StandardInput;
+    internal nint StandardOutput;
+    internal nint StandardError;
+}
+
+/// <summary>The handles and ids <c>CreateProcessW</c> returns for the new process.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ProcessInformation
+{
+    internal nint Process;
+    internal nint Thread;
+    internal int ProcessId;
+    internal int ThreadId;
 }
