@@ -59,3 +59,7 @@ desktop.ini
 .DS_Store
 /.mimosa
 /assets/brand/__pycache__
+
+# Local worktrees: they contain a full checkout and must never be committed
+/.worktrees/
+
