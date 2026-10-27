@@ -57,3 +57,4 @@ appsettings.*.local.json
 Thumbs.db
 desktop.ini
 .DS_Store
+/.mimosa

@@ -41,6 +41,13 @@ internal static class NativeMethods
     internal const int ScSize = 0xF000;
 
     /// <summary>
+    /// <c>WMSZ_LEFT</c>: the first of the eight edge codes <c>SC_SIZE</c> carries in its low four bits. The
+    /// <c>HTLEFT</c> family runs in the same order but starts at ten, so the edge code is the hit code's
+    /// offset from <c>HTLEFT</c> plus this base.
+    /// </summary>
+    internal const int WmszLeft = 1;
+
+    /// <summary>
     /// The wParam <c>VK_LBUTTON</c> value the move and size loops expect; the system asks for the button
     /// that started the drag, not a virtual key of a keyboard.
     /// </summary>

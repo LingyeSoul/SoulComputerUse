@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Threading;
+using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Startup.Split;
@@ -34,6 +35,7 @@ public sealed class ProductionAgentConnector : IAgentConnector
     private readonly string _nonce;
     private readonly AgentClientTimings _timings;
     private readonly IWaitClock _wait;
+    private readonly TimeSpan _attachWindow;
 
     /// <summary>Creates the connector for one agent launch, waiting on the caller's blocking clock.</summary>
     /// <exception cref="ArgumentException">The session id or the nonce is empty.</exception>
@@ -50,6 +52,22 @@ public sealed class ProductionAgentConnector : IAgentConnector
         string nonce,
         AgentClientTimings timings,
         IWaitClock wait)
+        : this(sessionId, nonce, timings, wait, AttachWindow)
+    {
+    }
+
+    /// <summary>
+    /// Creates the connector for one agent launch with an explicit wait clock and attach window, which a
+    /// test scales down so a refusal is observed without waiting the production window.
+    /// </summary>
+    /// <exception cref="ArgumentException">The session id, the nonce or the attach window is empty.</exception>
+    /// <exception cref="ArgumentNullException">The timings or the wait clock is null.</exception>
+    public ProductionAgentConnector(
+        string sessionId,
+        string nonce,
+        AgentClientTimings timings,
+        IWaitClock wait,
+        TimeSpan attachWindow)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -61,12 +79,18 @@ public sealed class ProductionAgentConnector : IAgentConnector
             throw new ArgumentException("The binding nonce must not be empty.", nameof(nonce));
         }
 
+        if (attachWindow <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(attachWindow), attachWindow, "The attach window must be positive.");
+        }
+
         ArgumentNullException.ThrowIfNull(timings);
         ArgumentNullException.ThrowIfNull(wait);
         _sessionId = sessionId;
         _nonce = nonce;
         _timings = timings;
         _wait = wait;
+        _attachWindow = attachWindow;
     }
 
     /// <inheritdoc />
@@ -75,14 +99,15 @@ public sealed class ProductionAgentConnector : IAgentConnector
     /// window closes. Every other refusal is final: a peer that rejected the SID check or the nonce must
     /// not be retried, because the same values would be rejected again.
     /// <para>
-    /// Each retry waits on the injected clock, which is what keeps the product window alive: this runs on
-    /// the thread that owns the window, so a plain sleep here would freeze the caption and the remote
-    /// desktop control for the whole attach window and make the window look unresponsive.
+    /// Each retry waits on the injected clock, and so does each attempt itself, which is what keeps the
+    /// product window alive: this runs on the thread that owns the window, so a plain blocking wait here
+    /// would freeze the caption, the buttons and the remote desktop control for the whole connect timeout
+    /// of every attempt, and the window would look unresponsive while the agent is still starting.
     /// </para>
     /// </remarks>
     public AgentAttachOutcome Attach()
     {
-        long deadline = Environment.TickCount64 + (long)AttachWindow.TotalMilliseconds;
+        long deadline = Environment.TickCount64 + (long)_attachWindow.TotalMilliseconds;
         AgentAttachOutcome outcome = Attempt();
         while (!outcome.Connected
             && outcome.FailureCode == SessionErrorCode.Disconnected
@@ -101,6 +126,17 @@ public sealed class ProductionAgentConnector : IAgentConnector
     /// <summary>How long one failed attempt waits before the pipe is tried again.</summary>
     private static readonly TimeSpan AttachRetryInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>How long one attempt's slices may run while the pipe call is in flight.</summary>
+    /// <remarks>
+    /// The pipe call bounds itself with the contract timeouts, so this ceiling only stops a call that
+    /// none of them ended; it is the sum of the connect, handshake and action timeouts plus a small
+    /// margin, and reaching it is reported as an ordinary failed attempt.
+    /// </remarks>
+    private TimeSpan AttemptCeiling => _timings.ConnectTimeout + _timings.HandshakeTimeout + _timings.ActionTimeout + AttemptSlice;
+
+    /// <summary>How long one slice of an attempt waits on the clock before looking at the call again.</summary>
+    private static readonly TimeSpan AttemptSlice = TimeSpan.FromMilliseconds(100);
+
     private AgentAttachOutcome Attempt()
     {
         AgentPipeClient client = new(
@@ -110,7 +146,7 @@ public sealed class ProductionAgentConnector : IAgentConnector
             new WindowsAgentProcessProbe());
         try
         {
-            SessionStatus status = client.GetStatusAsync(CancellationToken.None).GetAwaiter().GetResult();
+            SessionStatus status = WaitOnClock(client.GetStatusAsync(CancellationToken.None));
             status.Validate();
             int agentProcessId = client.ServerProcessId;
             if (agentProcessId <= 0)
@@ -133,6 +169,31 @@ public sealed class ProductionAgentConnector : IAgentConnector
             Trace("failed reason=unexpected type=" + error.GetType().Name);
             return AgentAttachOutcome.Failed(SessionErrorCode.Disconnected);
         }
+    }
+
+    /// <summary>
+    /// Waits for one pipe call on the injected clock, in slices, instead of blocking the thread.
+    /// </summary>
+    /// <remarks>
+    /// The call itself already fails with its contract timeout, so the ceiling here is a guard for a call
+    /// that outlives them all; a caller whose clock pumps window messages keeps the product window
+    /// answering for the whole attempt.
+    /// </remarks>
+    private T WaitOnClock<T>(Task<T> call)
+    {
+        long deadline = Environment.TickCount64 + (long)AttemptCeiling.TotalMilliseconds;
+        while (!call.IsCompleted)
+        {
+            if (Environment.TickCount64 >= deadline)
+            {
+                throw new TimeoutException(
+                    "The agent pipe call did not finish within the sum of its contract timeouts.");
+            }
+
+            _wait.Wait(AttemptSlice);
+        }
+
+        return call.GetAwaiter().GetResult();
     }
 
     private static void DisposeQuietly(AgentPipeClient client)

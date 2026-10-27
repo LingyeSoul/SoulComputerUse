@@ -122,4 +122,22 @@ public static class WindowFrameHitTest
             _ => throw new ArgumentOutOfRangeException(nameof(edge), edge, "Unknown resize handle."),
         };
     }
+
+    /// <summary>
+    /// The <c>WM_SYSCOMMAND</c> wParam that starts the system's resize loop for one resize handle's hit
+    /// code.
+    /// </summary>
+    /// <remarks>
+    /// <c>SC_SIZE</c> carries the edge in its low four bits, and those codes run from
+    /// <c>WMSZ_LEFT</c> (1) to <c>WMSZ_BOTTOMRIGHT</c> (8) in the same order as the <c>HTLEFT</c> family.
+    /// The family starts at ten, not at one, so the offset is taken from <c>HTLEFT</c>; an offset from
+    /// <c>HTCAPTION</c> would shift every edge by seven and push half of them past the four-bit domain
+    /// the resize loop accepts, which the default procedure answers by refusing the command: the window
+    /// then cannot be resized at all.
+    /// </remarks>
+    /// <param name="hitTestCode">The hit code of the pressed resize handle.</param>
+    public static int SystemSizeCommand(int hitTestCode)
+    {
+        return NativeMethods.ScSize + hitTestCode - NativeMethods.HtLeft + NativeMethods.WmszLeft;
+    }
 }

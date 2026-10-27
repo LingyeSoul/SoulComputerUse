@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Windows.Ipc;
+using SoulComputerUse.Windows.Shell;
 
 namespace SoulComputerUse.Windows.Hosting.Startup.Production;
 
@@ -133,8 +134,12 @@ public sealed class ProductionOwnerPipeHost : IOwnerPipeHost, IAsyncDisposable
             {
                 // The probe is a named pipe connection, not a remote desktop connection: this type never
                 // opens a child session. The asynchronous overload is used so the scan that pins the
-                // remote desktop connect surface stays meaningful.
-                probe.ConnectAsync(ProbeTimeoutMilliseconds).GetAwaiter().GetResult();
+                // remote desktop connect surface stays meaningful. The wait pumps window messages,
+                // because this runs on the thread that owns the product window and a blocking wait would
+                // add its own timeout to the time the window cannot be dragged or clicked.
+                Task connectTask = probe.ConnectAsync(ProbeTimeoutMilliseconds);
+                PumpUntilCompleted(connectTask);
+                connectTask.GetAwaiter().GetResult();
                 return;
             }
             catch (TimeoutException)
@@ -149,6 +154,22 @@ public sealed class ProductionOwnerPipeHost : IOwnerPipeHost, IAsyncDisposable
 
         throw new InvalidOperationException(
             "The owner pipe did not accept a probe connection within its startup timeout, so the session was not reported ready.");
+    }
+
+    /// <summary>
+    /// Waits for the probe connection while pumping the calling thread's window messages, in small slices.
+    /// </summary>
+    /// <remarks>
+    /// The connection bounds itself with its own probe timeout, so the ceiling only stops a connection
+    /// that outlives it; on a thread without windows the pump merely yields the same way a sleep would.
+    /// </remarks>
+    private static void PumpUntilCompleted(Task connectTask)
+    {
+        long deadline = Environment.TickCount64 + ProbeTimeoutMilliseconds + 500;
+        while (!connectTask.IsCompleted && Environment.TickCount64 < deadline)
+        {
+            MessagePump.PumpFor(TimeSpan.FromMilliseconds(20), () => connectTask.IsCompleted);
+        }
     }
 
     private static async Task DisposeServerAsync(NamedPipeSessionServer server, Task loop)

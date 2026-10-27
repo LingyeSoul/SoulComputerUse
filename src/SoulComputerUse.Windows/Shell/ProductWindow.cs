@@ -353,21 +353,6 @@ public sealed class ProductWindow : IDisposable
         }
     }
 
-    /// <summary>
-    /// The <c>SC_SIZE</c> argument for one resize handle.
-    /// </summary>
-    /// <remarks>
-    /// <c>SC_SIZE</c> carries the edge in its low four bits, and the four edge and four corner codes happen
-    /// to be the same small numbers in the same order as the <c>HTLEFT</c> family, which is why the hit code
-    /// can be reduced to its offset inside that family. <c>HTCAPTION</c> is the family's base, so the offset
-    /// is <c>hitTestCode - HTCAPTION</c>.
-    /// </remarks>
-    /// <param name="hitTestCode">The hit code of the pressed resize handle.</param>
-    private static int ResizeCode(int hitTestCode)
-    {
-        return hitTestCode - NativeMethods.HtCaption;
-    }
-
     private static nint HandleWindowMessage(nint handle, uint message, nint wParam, nint lParam)
     {
         OpenWindows.TryGetValue(handle, out ProductWindow? window);
@@ -696,6 +681,18 @@ public sealed class ProductWindow : IDisposable
     /// reports <c>HTCAPTION</c> and the style bits are all present.
     /// </para>
     /// <para>
+    /// The move command must be <c>SC_MOVE | HTCAPTION</c>, the variant a real caption press produces:
+    /// <c>SC_MOVE</c> alone is the keyboard form of the system-menu command, which parks the window in a
+    /// mode that waits for arrow keys instead of following the held mouse button. The resize command's
+    /// edge argument is computed by <see cref="WindowFrameHitTest.SystemSizeCommand"/>, because the
+    /// <c>WMSZ</c> codes do not start where the hit-code family does.
+    /// </para>
+    /// <para>
+    /// <c>lParam</c> must be zero. The system reads it as the cursor's screen position when the command
+    /// came from a mouse press, so any other value — a window handle, for example — teleports the cursor
+    /// to that packed point before the loop starts.
+    /// </para>
+    /// <para>
     /// Releasing the capture first matters: the system's loop takes the pointer itself, and a window that
     /// still holds the capture never sees the mouse move that would begin the drag.
     /// </para>
@@ -708,7 +705,7 @@ public sealed class ProductWindow : IDisposable
         switch (hitTestCode)
         {
             case NativeMethods.HtCaption:
-                command = NativeMethods.ScMove;
+                command = NativeMethods.ScMove | NativeMethods.HtCaption;
                 break;
             case NativeMethods.HtLeft:
             case NativeMethods.HtRight:
@@ -718,14 +715,14 @@ public sealed class ProductWindow : IDisposable
             case NativeMethods.HtTopRight:
             case NativeMethods.HtBottomLeft:
             case NativeMethods.HtBottomRight:
-                command = NativeMethods.ScSize + ResizeCode(hitTestCode);
+                command = WindowFrameHitTest.SystemSizeCommand(hitTestCode);
                 break;
             default:
                 return;
         }
 
         _ = NativeMethods.ReleaseCapture();
-        _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSysCommand, command, handle);
+        _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSysCommand, command, 0);
     }
 
     /// <summary>Completes the press cycle after a non-client button release.</summary>

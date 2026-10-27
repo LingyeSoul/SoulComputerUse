@@ -70,4 +70,37 @@ public sealed class WindowFrameHitTestTests
         Assert.AreEqual(17, WindowFrameHitTest.ToHitTestCode(ResizeEdge.BottomRight));
         Assert.AreEqual(1, WindowFrameHitTest.ToHitTestCode(ResizeEdge.None));
     }
+
+    [TestMethod]
+    public void EachHandleStartsTheSystemResizeLoopForItsOwnEdge()
+    {
+        Assert.AreEqual(0xF001, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.Left)));
+        Assert.AreEqual(0xF002, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.Right)));
+        Assert.AreEqual(0xF003, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.Top)));
+        Assert.AreEqual(0xF004, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.TopLeft)));
+        Assert.AreEqual(0xF005, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.TopRight)));
+        Assert.AreEqual(0xF006, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.Bottom)));
+        Assert.AreEqual(0xF007, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.BottomLeft)));
+        Assert.AreEqual(0xF008, WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(ResizeEdge.BottomRight)));
+    }
+
+    [TestMethod]
+    public void EveryResizeCommandStaysInsideTheLowFourBitsTheSizeLoopAccepts()
+    {
+        foreach (ResizeEdge edge in Enum.GetValues<ResizeEdge>())
+        {
+            if (edge == ResizeEdge.None)
+            {
+                continue;
+            }
+
+            int command = WindowFrameHitTest.SystemSizeCommand(WindowFrameHitTest.ToHitTestCode(edge));
+            int edgeCode = command & 0xF;
+            Assert.IsInRange(
+                1,
+                8,
+                edgeCode,
+                "The size loop carries the edge in its low four bits, and WMSZ_LEFT..WMSZ_BOTTOMRIGHT are 1..8.");
+        }
+    }
 }
