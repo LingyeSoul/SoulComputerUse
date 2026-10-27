@@ -13,10 +13,19 @@ namespace SoulComputerUse.SessionAgent;
 /// starts the desktop shell, and serves the secured agent pipe until the host disconnects or the
 /// unclaimed gate expires.
 /// </summary>
+/// <remarks>
+/// The process is built as a window-subsystem application, so the child session's entry starts it
+/// without a console window on the desktop the operator is watching. It attaches to the caller's
+/// console only when the caller has one, which keeps standard error readable for manual runs from a
+/// terminal.
+/// </remarks>
 internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        // Windowless by design; this only restores standard error when a terminal started the process.
+        AgentConsole.AttachToParentConsoleWhenPresent();
+
         AgentOptions options;
         try
         {

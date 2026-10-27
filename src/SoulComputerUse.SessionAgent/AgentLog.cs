@@ -10,11 +10,11 @@ namespace SoulComputerUse.SessionAgent;
 /// Writes one structured agent log line to standard error, and keeps a copy in a per-user file.
 /// </summary>
 /// <remarks>
-/// In production the agent is the child session's alternate shell, so its standard error has no reader: a
-/// failure there is invisible, and the host can only report the contract code it observed. The file copy is
-/// therefore not an optional debugging aid but the agent's only durable record. It carries the same
-/// whitelisted fields as the standard-error line, so it can be attached to a report without a redaction
-/// pass.
+/// In production the agent is started by the child session's Run entry as a window-subsystem process, so
+/// no console exists and its standard error has no reader: a failure there is invisible, and the host can
+/// only report the contract code it observed. The file copy is therefore not an optional debugging aid but
+/// the agent's only durable record. It carries the same whitelisted fields as the standard-error line, so
+/// it can be attached to a report without a redaction pass.
 /// </remarks>
 public static class AgentLog
 {

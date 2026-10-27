@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- The child session starts the agent from its own Run entry on the desktop the operator watches
+         through the product window. A console-subsystem process makes Windows open a black console
+         window there, so the agent is built as a window-subsystem process; manual runs from a terminal
+         keep their standard error through the parent-console attach in AgentConsole. -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>

@@ -14,6 +14,8 @@ CLI / MCP ── SoulComputerUse.owner ── Host（owner，持单实例锁）
 - owner 管道承载七个工具，由 `SessionOwnerService` 与 `NamedPipeSessionServer` 提供。
 - agent 管道承载同一组工具，由 `AgentPipeServer` 提供；连接前校验当前用户 SID、显式 DACL 与 nonce。
 - 两条管道的名字、握手和信任边界不同，不得混用。
+- 代理进程以**窗口子系统**（`WinExe`）构建：子会话的 `Run` 启动项拉起它时不会出现控制台窗口；只有手工从终端启动时，代理才附加到调用方的控制台，标准错误才有读者。
+- 工具调用不落盘：截图经管道以 base64 帧返回，CLI 仅在显式指定 `--out` 时写文件。会话生命周期内的磁盘写入只有所有权记录（每次状态迁移一次）与代理诊断日志（每个事件一行）。
 
 ## 1.1 画面路径
 
@@ -94,7 +96,7 @@ SoulComputerUse.Host.exe --new-session
 1. 构建：`dotnet build SoulComputerUse.slnx`。
 2. 启动新建会话模式：`SoulComputerUse.Host.exe --new-session`；标题栏应显示「正在连接…」后转为「等待验证」。
 3. 在产品窗口内看到 Windows 登录界面，亲手输入该账户的密码并登录。
-4. 登录后窗口应出现远端子会话桌面，标题栏转为就绪态。
+4. 登录后窗口应出现远端子会话桌面（桌面上没有代理的控制台窗口），标题栏转为就绪态。
 5. 运行 `scu status`，应返回 `state=ready`、`sessionId`、`authTier`、`gateStrength` 与屏幕尺寸。
 6. 运行 `scu shot --out <临时文件>`，应得到子会话桌面的 PNG。
 7. 运行 `scu click`、`scu type`、`scu key`，确认输入落在子会话而非控制台桌面。
