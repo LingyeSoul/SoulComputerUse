@@ -40,7 +40,7 @@
 | `status-text.size` | 12px / 9pt | 状态文案字号，与标题同字号同基线 |
 | `radius.window` | 8px | 顶层窗口圆角（Win11 DWM 原生圆角，不自绘） |
 | `radius.caption-button` | 0 | 按钮保持直角方块，贴边绘制 |
-| `window.resize-border` | 8px | 四边缩放命中区宽（物理像素，`WM_NCHITTEST` 返回对应 `HTLEFT` 等，四角为 `HTTOPLEFT` 等对角热区）；按 DPI 缩放，与三键命中区同等优先保证 |
+| `window.resize-border` | 4px | 四边缩放命中区宽（物理像素，`WM_NCHITTEST` 返回对应 `HTLEFT` 等，四角为 `HTTOPLEFT` 等对角热区）；按 DPI 缩放，与三键命中区同等优先保证 |
 
 ### 2.2 颜色（深色 / 浅色双主题）
 

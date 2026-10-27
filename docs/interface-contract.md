@@ -1,4 +1,4 @@
-# SoulComputerUse 接口契约（v2.6 · 定稿：单实例锁句柄模型、全机唯一锁、确认即注销、同账户 child session 地基（helper exe 经 UAC 开启/关回）、RDP alternate shell 拉起代理、门禁三档——`hello-enrolled` Hello 强验证 / `system-credential` **子会话系统登录验证**（2026-10-26 用户实测确认：全新子会话先出 Windows 登录界面、密码由用户亲手输入；连接前必须确认无遗留已登录子会话）/ `none` 拒启）
+# SoulComputerUse 接口契约（v2.7 · 定稿：单实例锁句柄模型、全机唯一锁、确认即注销、同账户 child session 地基（helper exe 经 UAC 开启/关回）、临时 HKCU Run 启动项拉起代理（v2.7：RDP alternate shell 在 child session 下经 2026-10-27 实测被忽略，机制改定，见 §3.1）、门禁三档——`hello-enrolled` Hello 强验证 / `system-credential` **子会话系统登录验证**（2026-10-26 用户实测确认：全新子会话先出 Windows 登录界面、密码由用户亲手输入；连接前必须确认无遗留已登录子会话）/ `none` 拒启）
 
 > 范围：会话状态机、错误码、单实例锁、代理启动与自退、IPC、MCP 工具、CLI 命令、凭据流程、关闭语义、坐标模型、脱敏与日志白名单、非目标。
 > 本文全部使用虚构占位值（`example-session`、`192.0.2.10`、`/path/to/project`、`REDACTED`），不含真实路径、账户与机器信息。
@@ -110,15 +110,16 @@
   4. 记录中 `state` ∈ {`disconnected`, `closing`} 或 `acquiredAt` 距今超过 24 小时。
 - 接管前后均写结构化日志；接管失败（文件损坏、字段缺失）不静默清理。
 
-### 3.1 代理启动生命周期（RDP alternate shell 拉起；注册表零落地）
+### 3.1 代理启动生命周期（临时 HKCU Run 启动项拉起；会话期间挂载、结束即删）
 
 - **地基形态（已定稿，v1.7 修正）**：虚拟桌面 = **同账户 child session**，由 RDP ActiveX `ConnectToChildSession` 属性建立。**子会话能力是系统级开关（`WTSEnableChildSessions`），干净机器默认关闭；开启与关闭都需要管理员权限；改完立即生效，无需重启**（本机实验证实：开启后 child session 可建、主控制台会话全程存活、注销干净；本机曾误当默认开启，实为早年研究所改）。开关生命周期见 §3.1.1。
 - **账户前提（硬约束）**：**子会话与宿主是同一个 Windows 账户**（child session 继承当前登录身份）。契约不支持「子会话用别的 Windows 账户」；账户一致性由 §4 握手的对端 SID 校验承担，不一致判 `E_IPC_PEER`，不另立检测入口。
-- **拉起方式（已定稿）**：**RDP 连接设置 alternate shell**（登录后自动运行程序）。连接参数把代理 exe 登记为会话外壳程序，连接一建立代理即在子会话内运行。
-  - 值内容 = 代理 exe 路径（契约中用占位 `/path/to/project/agent.exe` 表示）+ 产品标记参数 `--scu-bootstrap` + 绑定参数（见 §4），**绝不含任何凭据**，且**只存在于内存中的连接设置，不落注册表、不落磁盘**。
-  - alternate shell 会顶替 explorer 作为外壳 → **代理启动后第一件事：拉起 explorer**（壁纸/图标/任务栏），再进入自退三闸与握手流程。explorer 拉起失败不静默：代理照常进入认领流程，宿主侧状态转 `blocked`（原因码 `shell-missing`），工具调用按 §1.3 拒绝，由用户决定是否人工处理。
-- **历史方案（RunOnce）已废弃**：候选 `HKCU RunOnce` 方案连同写入/自删/清删/查询/卸载条款整体作废；废弃理由：需要注册表落地，与「零落地」目标冲突。错误码 `E_BOOTSTRAP_EXISTS` 一并移除（见 §2）。
-- 安全靠**可审计**：不隐藏、不伪装、不改策略、不碰杀软白名单；本产品**不直接写注册表项**——子会话开关经系统 API（UAC 授权后）变更，且只在我们开的那个会话结束时按标记关回。
+- **拉起方式（v2.7 修正：旧机制经实测证伪后改定）**：**连接前把代理命令行挂载为本账户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 启动项**（值名 `SoulComputerUse.ChildSessionAgent`），会话结束（正常关闭与拒绝退出两条路径）删除。child session 与宿主同账户、读同一 HKCU 配置单元：其桌面外壳登录时读取 Run 启动项并拉起代理。
+  - **旧机制废弃理由（2026-10-27 真机证据）**：RDP `StartProgram`/alternate shell 属性在 child session 下被 Windows 忽略——属性写入并回读为真，但子会话照常启动完整桌面（进程表实测：explorer/sihost/taskhostw 全在、代理未启动、代理日志零新增；对照官方文档：child session 为环回自动登录会话，不提示凭据、无登录屏，文档亦未提供任何 shell 定制入口）。连接参数仍保留该属性的写入与回读验证（未来 Windows 若支持则自动生效），但不再作为拉起依据。
+  - **对 v2.6「注册表零落地」与「RunOnce 已废弃」条款的修订**：废弃 RunOnce 的唯一理由（零落地目标）与机制现实冲突——alternate shell 路线已被证伪，同账户、普通权限的宿主没有第三条在子会话内起进程的路（`WTSQueryUserToken`/`CreateProcessAsUser` 需 SYSTEM）。故恢复注册表路线并加约束：**仅在会话生命周期内挂载**（与子会话开关同一对称记账模式），**结束必删**（含拒绝退出路径，`NewSessionHost` 两条退出路径均执行删除），**崩溃残留由代理三闸兜底**（在 console 会话被启动即自拒退出，仅留一条日志，无其他影响）。
+  - 值内容 = 代理 exe 路径 + 绑定参数（见 §4），**绝不含任何凭据**；nonce 在挂载窗口内可被同账户进程经注册表读取的风险与旧机制（命令行经连接属性传递）等同，管道 DACL + 对端 SID 校验仍是主认证。
+  - 代理不再是外壳（explorer 由系统正常启动），代理启动后无需再拉起 explorer；`shell-missing` 阻塞原因保留定义，正常路径不再触发。
+- 安全靠**可审计**：不隐藏、不伪装、不改策略、不碰杀软白名单；注册表写入仅限上述单个 Run 值（HKCU、当前用户、会话期内存在、可审计）；子会话开关经系统 API（UAC 授权后）变更，且只在我们开的那个会话结束时按标记关回。
 
 ### 3.1.1 子会话系统开关生命周期（`WTSEnableChildSessions`）
 

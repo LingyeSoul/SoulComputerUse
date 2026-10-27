@@ -64,6 +64,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
 
     private bool _ran;
     private bool _recordWrittenByThisAttempt;
+    private bool _bootstrapMountedByThisAttempt;
 
     /// <summary>Creates one before-connect segment over the ports and the launch values a start needs.</summary>
     /// <exception cref="ArgumentNullException">The options, a port or the launch request is null.</exception>
@@ -453,9 +454,22 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
     }
 
     /// <summary>
-    /// Writes the two alternate-shell properties that make the child session run the agent instead of the
-    /// usual shell. The write is verified by <see cref="RdpLaunchConfigurator"/> itself.
+    /// Writes the two alternate-shell properties and mounts the start-up entry that really starts the
+    /// agent inside the child session.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The properties are still written and verified, because they are what a future Windows that
+    /// honours them would run; the start-up entry is what today's Windows runs, because a child session
+    /// ignores <c>StartProgram</c> and always starts the desktop shell (see
+    /// <see cref="ChildSessionAgentBootstrap"/>). The entry carries the same command line the property
+    /// does, so whichever of the two the machine applies, the agent starts with the same binding values.
+    /// </para>
+    /// <para>
+    /// A session that configured neither refuses here rather than at the attach window, because a child
+    /// session with no configured start route can never produce the agent pipe the next phase waits for.
+    /// </para>
+    /// </remarks>
     private void ConfigureAlternateShell()
     {
         try
@@ -464,10 +478,8 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            throw new SessionStartException(
-                SessionErrorCode.ManualIntervention,
+            throw SessionStartSplitFailure(
                 SessionStartSplitMessages.AlternateShellUnavailable,
-                _steps.Snapshot,
                 error);
         }
 
@@ -477,12 +489,38 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            throw new SessionStartException(
-                SessionErrorCode.ManualIntervention,
+            throw SessionStartSplitFailure(
                 SessionStartSplitMessages.AlternateShellWriteFailed,
-                _steps.Snapshot,
                 error);
         }
+
+        try
+        {
+            string commandLine = AgentLaunchCommandLine.Build(
+                _launchRequest.ExecutablePath,
+                _launchRequest.SessionId,
+                _launchRequest.Nonce,
+                _launchRequest.AuthTier,
+                _launchRequest.GateStrength);
+            ChildSessionAgentBootstrap.Install(commandLine);
+            _bootstrapMountedByThisAttempt = true;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            throw SessionStartSplitFailure(
+                SessionStartSplitMessages.AgentBootstrapWriteFailed,
+                error);
+        }
+    }
+
+    /// <summary>Records one failed alternate-shell stage and builds the refusal that reports it.</summary>
+    private SessionStartException SessionStartSplitFailure(string reason, Exception innerException)
+    {
+        return new SessionStartException(
+            SessionErrorCode.ManualIntervention,
+            reason,
+            _steps.Snapshot,
+            innerException);
     }
 
     /// <summary>Records one failed stage and builds the refusal that reports it.</summary>
@@ -497,9 +535,9 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
     }
 
     /// <summary>
-    /// Deletes the record this attempt wrote, then closes the lock handle. Every step is attempted even
-    /// when an earlier one fails, and the failures travel beside the original refusal instead of being
-    /// swallowed.
+    /// Deletes the record this attempt wrote, removes the start-up entry this attempt mounted, then
+    /// closes the lock handle. Every step is attempted even when an earlier one fails, and the failures
+    /// travel beside the original refusal instead of being swallowed.
     /// </summary>
     private SessionStartException Cleanup(Exception error, IDisposable? lockHandle)
     {
@@ -516,6 +554,20 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
             }
 
             _recordWrittenByThisAttempt = false;
+        }
+
+        if (_bootstrapMountedByThisAttempt)
+        {
+            try
+            {
+                ChildSessionAgentBootstrap.Remove();
+            }
+            catch (Exception removeError) when (removeError is not OutOfMemoryException)
+            {
+                failures.Add(removeError);
+            }
+
+            _bootstrapMountedByThisAttempt = false;
         }
 
         if (lockHandle is not null)

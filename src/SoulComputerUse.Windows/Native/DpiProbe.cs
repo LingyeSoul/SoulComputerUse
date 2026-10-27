@@ -34,6 +34,22 @@ public static class DpiProbe
         return (int)dpi;
     }
 
+    /// <summary>
+    /// Returns the system DPI, which for a per-monitor-aware process is the primary display's DPI at
+    /// process start. A window created at the default position lands there, so this is the DPI its
+    /// caption layout is measured with before the window exists.
+    /// </summary>
+    public static int GetSystemDpi()
+    {
+        uint dpi = NativeMethods.GetDpiForSystem();
+        if (dpi == 0)
+        {
+            throw NativeMethods.InteropFailure("GetDpiForSystem", Marshal.GetLastWin32Error());
+        }
+
+        return (int)dpi;
+    }
+
     /// <summary>Returns the DPI awareness of the calling thread.</summary>
     public static DpiAwareness GetThreadAwareness()
     {

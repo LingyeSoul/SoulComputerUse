@@ -6,17 +6,17 @@ using SoulComputerUse.Windows.Shell;
 namespace SoulComputerUse.IntegrationTests;
 
 /// <summary>
-/// Real-window acceptance for the resize border: the spec says the four edges answer HTLEFT / HTRIGHT /
-/// HTTOP / HTBOTTOM inside an 8 px scaled border, while the caption buttons must win where they meet
-/// that border. Every assertion reads a hit-test code back from a real window, so resize support cannot
+/// Real-window acceptance for the resize border: the four edges answer HTLEFT / HTRIGHT / HTTOP /
+/// HTBOTTOM inside the scaled resize border, while the caption buttons must win where they meet that
+/// border. Every assertion reads a hit-test code back from a real window, so resize support cannot
 /// exist only in the spec.
 /// </summary>
 [TestClass]
 [DoNotParallelize]
 public sealed class ProductWindowResizeAdversarialTests
 {
-    /// <summary>The spec's resize border width at 100% scaling, in physical pixels.</summary>
-    private const int ResizeBorderToken = 8;
+    /// <summary>The resize border width at 100% scaling, in physical pixels, straight from the product.</summary>
+    private const int ResizeBorderToken = WindowFrameHitTest.ResizeBorderPixels;
 
     private const int WindowWidth = 900;
     private const int WindowHeight = 600;

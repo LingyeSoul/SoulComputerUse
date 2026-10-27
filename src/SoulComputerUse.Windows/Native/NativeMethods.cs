@@ -104,6 +104,12 @@ internal static class NativeMethods
 
     internal const int SmCxScreen = 0;
     internal const int SmCyScreen = 1;
+
+    /// <summary><c>SM_CXFULLSCREEN</c>: the primary display's work-area width.</summary>
+    internal const int SmCxFullScreen = 16;
+
+    /// <summary><c>SM_CYFULLSCREEN</c>: the primary display's work-area height.</summary>
+    internal const int SmCyFullScreen = 17;
     internal const int ErrorAlreadyExists = 183;
     internal const int ErrorFileNotFound = 2;
     internal const uint Synchronize = 0x00100000;
@@ -276,6 +282,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern uint GetDpiForWindow(nint handle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern uint GetDpiForSystem();
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern nint GetThreadDpiAwarenessContext();

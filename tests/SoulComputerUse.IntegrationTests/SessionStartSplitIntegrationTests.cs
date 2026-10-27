@@ -54,6 +54,11 @@ public sealed class SessionStartSplitIntegrationTests
     [TestInitialize]
     public void CreateTemporaryState()
     {
+        // The before-connect segment mounts the real start-up entry in this account's Run key, so a case
+        // starts by removing any leftover and ends by removing its own: an entry that leaked between
+        // cases would start an agent on this account's next logon.
+        ChildSessionAgentBootstrap.Remove();
+
         _root = Path.Combine(Path.GetTempPath(), "scu-split-start-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_root);
         _lockName = @"Global\SoulComputerUse-Test-" + Guid.NewGuid().ToString("N");
@@ -75,6 +80,11 @@ public sealed class SessionStartSplitIntegrationTests
         Assert.IsFalse(
             SingleInstanceLock.IsHeldByAnyone(_lockName),
             "The case's own lock must be gone afterwards, otherwise a holder leaked.");
+
+        ChildSessionAgentBootstrap.Remove();
+        Assert.IsNull(
+            ChildSessionAgentBootstrap.Read(),
+            "The start-up entry must be gone after the case, otherwise an agent would start on this account's next logon.");
 
         _store.Delete();
 

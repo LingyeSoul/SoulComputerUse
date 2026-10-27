@@ -41,8 +41,16 @@ public enum ResizeEdge
 /// </summary>
 public static class WindowFrameHitTest
 {
-    /// <summary>The resize handle width in physical pixels, which is also what the spec asks for.</summary>
-    public const int ResizeBorderPixels = 8;
+    /// <summary>
+    /// The resize handle width in physical pixels, which is also what the spec asks for.
+    /// </summary>
+    /// <remarks>
+    /// Four logical pixels: wide enough to grab at every DPI, and narrow enough that the band it keeps
+    /// free around the remote desktop reads as a frame hairline rather than a black bar. A child window
+    /// owns every point inside its rectangle, so this band is also what keeps the eight resize handles
+    /// reachable at all — zero would return an unresizable window.
+    /// </remarks>
+    public const int ResizeBorderPixels = 4;
 
     /// <summary>Resolves the resize handle under a client-area point.</summary>
     /// <param name="clientWidth">Client width in physical pixels.</param>

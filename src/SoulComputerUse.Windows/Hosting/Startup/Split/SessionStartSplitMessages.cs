@@ -19,6 +19,13 @@ public static class SessionStartSplitMessages
     public const string AlternateShellWriteFailed =
         "The alternate-shell properties did not stick on the hosted control, so the child session would start the usual shell instead of the agent.";
 
+    /// <summary>
+    /// The explanation when the start-up entry that starts the agent on the child session's logon could
+    /// not be mounted.
+    /// </summary>
+    public const string AgentBootstrapWriteFailed =
+        "The start-up entry that launches the agent inside the child session could not be mounted, so the session could log on without an agent and nothing could attach to it.";
+
     /// <summary>The explanation when the agent process reports no positive Windows session id.</summary>
     public const string AgentSessionNotPositive =
         "The agent process reported no positive Windows session id, so the ownership record cannot name the child session the agent runs in.";

@@ -29,6 +29,7 @@ namespace SoulComputerUse.ContractTests;
 /// connection, and if every refusal leaves the machine exactly as it found it.
 /// </remarks>
 [TestClass]
+[DoNotParallelize]
 public sealed class SessionStartSplitTests
 {
     private const string SessionId = "b3f1c2d4-0000-4000-8000-000000000000";
@@ -45,7 +46,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void TheBeforeConnectSegmentRunsEveryStageInTheContractOrder()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = true;
 
         BeforeConnectResult result = fixture.Segment.Execute();
@@ -75,6 +76,12 @@ public sealed class SessionStartSplitTests
         Assert.AreEqual(AuthTier.SystemCredential, fixture.Segment.AuthTier);
         Assert.AreEqual(0, fixture.Gate.EnableCalls, "An already-on switch must never be touched.");
 
+        AgentLaunchRequest request = CreateLaunchRequest();
+        Assert.AreEqual(
+            AgentLaunchCommandLine.Build(request.ExecutablePath, request.SessionId, request.Nonce, request.AuthTier, request.GateStrength),
+            ChildSessionAgentBootstrap.Read(),
+            "A completed segment leaves the start-up entry mounted with the same command line the alternate-shell property carries, because a child session ignores StartProgram and its shell starts the agent from this entry.");
+
         CollectionAssert.AreEqual(
             new List<SessionStartStage>
             {
@@ -93,7 +100,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AStartThatEnabledTheSwitchRewritesTheRecordWithTheMarkerAfterTheElevation()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
 
         BeforeConnectResult result = fixture.Segment.Execute();
@@ -129,7 +136,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void TheNoneTierRefusesReleasesTheLockAndDeletesTheRecordItWrote()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Tier.Tier = AuthTier.None;
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => fixture.Segment.Execute());
@@ -144,6 +151,7 @@ public sealed class SessionStartSplitTests
         Assert.AreEqual(0, fixture.Gate.ProbeCount, "A refused tier must not read the machine's switch.");
         Assert.AreEqual(0, fixture.Gate.EnableCalls);
         Assert.IsEmpty(fixture.Launch.Writes, "A refused start must never write the alternate-shell properties.");
+        Assert.IsNull(ChildSessionAgentBootstrap.Read(), "A refused start must leave no start-up entry behind: the tier refuses before the entry is mounted.");
         Assert.IsNull(fixture.Segment.AuthTier, "A refused tier is not reported as a probed one.");
 
         CollectionAssert.AreEqual(
@@ -160,7 +168,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AFailedSweepRefusesWithManualInterventionAndRunsNothingAfterIt()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Sweep.Failure = new InvalidOperationException(
             "manual_intervention_required: a child session survived the logoff request.");
 
@@ -189,7 +197,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void ADeclinedElevationRefusesWithItsOwnCodeAndCleansUp()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
         fixture.Gate.Elevation = new ElevationResult(false, ElevationFailure.Declined, 1223);
 
@@ -208,7 +216,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AnUnavailableElevationRefusesWithItsOwnCode()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
         fixture.Gate.Elevation = new ElevationResult(false, ElevationFailure.Unavailable, 2);
 
@@ -223,7 +231,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AHelperFailureRefusesAsChildSessionsDisabled()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
         fixture.Gate.Elevation = new ElevationResult(false, ElevationFailure.HelperFailed, 3);
 
@@ -238,7 +246,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AHelperThatReportedSuccessButLeftTheSwitchOffIsRefused()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
         fixture.Gate.EnablesOnSuccess = false;
 
@@ -253,7 +261,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AHeldLockRefusesBeforeTheRecordIsRead()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Lock.HeldElsewhere = true;
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => fixture.Segment.Execute());
@@ -267,7 +275,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void ARecordThatCannotBeTakenOverRefusesAndIsNeverDeleted()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Records.ReadStatus = OwnerRecordStatus.NotTakeable;
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => fixture.Segment.Execute());
@@ -282,7 +290,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void ATakeOverRecordIsDeletedBeforeTheStartingRecordReplacesIt()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Records.ReadStatus = OwnerRecordStatus.TakeOver;
 
         BeforeConnectResult result = fixture.Segment.Execute();
@@ -323,7 +331,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void ADeniedPolicyValueRefusesBeforeElevationAndNamesTheValue()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Gate.Enabled = false;
         fixture.Gate.Policy[PolicyValue.RdpInbound] = PolicyState.Denied;
 
@@ -339,7 +347,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void AnAlternateShellWriteThatDidNotStickRefusesAndCleansUp()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
         fixture.Launch.IgnoreWrites = true;
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => fixture.Segment.Execute());
@@ -352,7 +360,7 @@ public sealed class SessionStartSplitTests
     [TestMethod]
     public void ASecondRunOfTheBeforeConnectSegmentIsRefused()
     {
-        BeforeConnectFixture fixture = new();
+        using BeforeConnectFixture fixture = new();
 
         fixture.Segment.Execute();
 
@@ -699,10 +707,16 @@ public sealed class SessionStartSplitTests
     /// <summary>
     /// The before-connect segment plus the fakes it is composed from and the call log of one case.
     /// </summary>
-    private sealed class BeforeConnectFixture
+    /// <remarks>
+    /// The segment mounts the real start-up entry in the current user's <c>Run</c> key, so the fixture
+    /// starts from a removed entry and removes it again when the case ends: a test that leaked the entry
+    /// would start an agent on this account's next logon.
+    /// </remarks>
+    private sealed class BeforeConnectFixture : IDisposable
     {
         internal BeforeConnectFixture()
         {
+            ChildSessionAgentBootstrap.Remove();
             Calls = [];
             Handle = new TrackingHandle(Calls);
             Lock = new FakeLockAcquire(Handle, Calls);
@@ -722,6 +736,11 @@ public sealed class SessionStartSplitTests
                 CreateLaunchRequest(),
                 Control,
                 Launch);
+        }
+
+        public void Dispose()
+        {
+            ChildSessionAgentBootstrap.Remove();
         }
 
         internal List<string> Calls { get; }

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.ChildSessions;
 using SoulComputerUse.Windows.Hosting.Startup;
 using SoulComputerUse.Windows.Hosting.Startup.Phases;
 using SoulComputerUse.Windows.Hosting.Startup.Production;
@@ -105,11 +106,40 @@ internal sealed class NewSessionHost : IDisposable
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             App.ShowStartupError(DescribeFailure(error));
+
+            // A start that never reached ready must not leave its machine footprint behind: the child
+            // session it created answers a later connection without asking for a logon, and the start-up
+            // entry it mounted would start an agent on the next logon of this account. Running both
+            // cleanups here — after the operator has read the refusal — is what keeps the abort path as
+            // settled as the normal close path.
+            ReleaseUnfinishedChildSession();
+            RemoveAgentBootstrap();
+            Dispose();
             return 1;
         }
 
         MessageLoop.Run();
         return CloseSession();
+    }
+
+    /// <summary>
+    /// Removes the start-up entry the before-connect segment mounted, on every exit path. A removal
+    /// that fails is reported, because a leftover entry starts the agent on this account's next logon
+    /// and the agent's own console gate is the only thing that would stop it.
+    /// </summary>
+    private static void RemoveAgentBootstrap()
+    {
+        try
+        {
+            ChildSessionAgentBootstrap.Remove();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine(
+                SessionErrorCodeNames.ToWireName(SessionErrorCode.ManualIntervention)
+                + " The child-session agent start-up entry could not be removed; the agent will refuse to run on the next console logon. Cause: "
+                + error.Message);
+        }
     }
 
     /// <summary>Disposes the window and the control. Idempotent.</summary>
@@ -254,8 +284,8 @@ internal sealed class NewSessionHost : IDisposable
             GateStrength.Login,
             blockedCause: null);
         ProductWindow window = ProductWindow.Create(
-            ProductWindowSize.Width,
-            ProductWindowSize.Height,
+            FittedClientWidth(),
+            FittedClientHeight(),
             SessionStatusVisuals.BuildTitle(SessionLabel),
             ConfirmClose,
             status);
@@ -273,6 +303,26 @@ internal sealed class NewSessionHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// The fitted client size computed for this session, kept once for the width and height calls.
+    /// </summary>
+    private (int Width, int Height)? _fittedClientSize;
+
+    private int FittedClientWidth() => FittedClient().Width;
+
+    private int FittedClientHeight() => FittedClient().Height;
+
+    /// <summary>
+    /// Sizes the window so the letterboxed picture fills the area below the caption with no black bars:
+    /// a fixed client size would letterbox every session whose ratio differs from it, which reads as a
+    /// broken picture rather than a window.
+    /// </summary>
+    private (int Width, int Height) FittedClient()
+    {
+        _fittedClientSize ??= SessionWindowSizing.ClientForSession(_plan.DesktopWidth, _plan.DesktopHeight);
+        return _fittedClientSize.Value;
+    }
+
     /// <summary>Runs the contract's shutdown sequence and returns the exit code it produced.</summary>
     private int CloseSession()
     {
@@ -285,12 +335,14 @@ internal sealed class NewSessionHost : IDisposable
             // already released the lock and the record. What must not survive is a child session this run
             // created, because it answers the next connection without asking the operator to log on.
             ReleaseUnfinishedChildSession();
+            RemoveAgentBootstrap();
             Dispose();
             return 0;
         }
 
         try
         {
+            RemoveAgentBootstrap();
             int childSessionId = ReadChildSessionId(agent.AgentProcessId);
             bool openedByUs = beforeConnect.ChildSessionsOpenedByUs;
 
