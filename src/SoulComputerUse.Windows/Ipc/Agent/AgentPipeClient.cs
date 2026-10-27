@@ -86,14 +86,14 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
     /// <inheritdoc />
     public async Task<SessionStatus> GetStatusAsync(CancellationToken cancellationToken)
     {
-        JsonElement result = await CallAsync(SessionTool.GetStatus, SessionToolPayloads.EmptyArguments(), cancellationToken);
+        JsonElement result = await CallAsync(SessionTool.GetStatus, SessionToolPayloads.EmptyArguments(), cancellationToken).ConfigureAwait(false);
         return SessionToolPayloads.ReadStatus(result);
     }
 
     /// <inheritdoc />
     public async Task<byte[]> ScreenshotAsync(CancellationToken cancellationToken)
     {
-        JsonElement result = await CallAsync(SessionTool.Screenshot, SessionToolPayloads.EmptyArguments(), cancellationToken);
+        JsonElement result = await CallAsync(SessionTool.Screenshot, SessionToolPayloads.EmptyArguments(), cancellationToken).ConfigureAwait(false);
         return SessionToolPayloads.ReadScreenshot(result);
     }
 
@@ -101,7 +101,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
     public async Task MouseMoveAsync(int x, int y, CancellationToken cancellationToken)
     {
         JsonElement arguments = JsonSerializer.SerializeToElement(new MouseMoveArguments(x, y), IpcJson.ArgumentOptions);
-        await CallActionAsync(SessionTool.MouseMove, arguments, cancellationToken);
+        await CallActionAsync(SessionTool.MouseMove, arguments, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -110,14 +110,14 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         SessionToolArguments.RequireClickCount(count);
         MouseClickArguments payload = new(x, y, button, count);
         JsonElement arguments = JsonSerializer.SerializeToElement(payload, IpcJson.ArgumentOptions);
-        await CallActionAsync(SessionTool.MouseClick, arguments, cancellationToken);
+        await CallActionAsync(SessionTool.MouseClick, arguments, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task MouseScrollAsync(int x, int y, int deltaX, int deltaY, CancellationToken cancellationToken)
     {
         JsonElement arguments = JsonSerializer.SerializeToElement(new MouseScrollArguments(x, y, deltaX, deltaY), IpcJson.ArgumentOptions);
-        await CallActionAsync(SessionTool.MouseScroll, arguments, cancellationToken);
+        await CallActionAsync(SessionTool.MouseScroll, arguments, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -125,7 +125,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
     {
         SessionToolArguments.RequireText(text);
         JsonElement arguments = JsonSerializer.SerializeToElement(new KeyTypeArguments(text), IpcJson.ArgumentOptions);
-        await CallActionAsync(SessionTool.KeyType, arguments, cancellationToken);
+        await CallActionAsync(SessionTool.KeyType, arguments, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -135,7 +135,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         SessionToolArguments.RequireKeys(keys);
         KeyPressArguments payload = new([.. keys]);
         JsonElement arguments = JsonSerializer.SerializeToElement(payload, IpcJson.ArgumentOptions);
-        await CallActionAsync(SessionTool.KeyPress, arguments, cancellationToken);
+        await CallActionAsync(SessionTool.KeyPress, arguments, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Closes the pipe and fails every call that is still waiting.</summary>
@@ -160,17 +160,17 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         _lifetime.Cancel();
         if (stream is not null)
         {
-            await stream.DisposeAsync();
+            await stream.DisposeAsync().ConfigureAwait(false);
         }
 
         if (readerLoop is not null)
         {
-            await readerLoop;
+            await readerLoop.ConfigureAwait(false);
         }
 
         if (heartbeatLoop is not null)
         {
-            await heartbeatLoop;
+            await heartbeatLoop.ConfigureAwait(false);
         }
 
         Break(AgentErrors.Disconnected(_pipeName));
@@ -181,7 +181,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
     private async Task CallActionAsync(SessionTool tool, JsonElement arguments, CancellationToken cancellationToken)
     {
-        JsonElement result = await CallAsync(tool, arguments, cancellationToken);
+        JsonElement result = await CallAsync(tool, arguments, cancellationToken).ConfigureAwait(false);
         if (result.ValueKind != JsonValueKind.Object)
         {
             throw new IpcProtocolException("The child-session agent reported a non-object result for an action call.");
@@ -194,7 +194,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        await EnsureConnectedAsync(cancellationToken);
+        await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
 
         int id = Interlocked.Increment(ref _nextId);
         TaskCompletionSource<IpcResponse> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -211,13 +211,13 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         try
         {
             IpcRequest request = new(id, SessionToolNames.ToWireName(tool), arguments);
-            await WriteLineAsync(IpcFrameCodec.WriteRequest(request), cancellationToken);
+            await WriteLineAsync(IpcFrameCodec.WriteRequest(request), cancellationToken).ConfigureAwait(false);
 
             TimeSpan timeout = tool == SessionTool.Screenshot ? _timings.ScreenshotTimeout : _timings.ActionTimeout;
             IpcResponse response;
             try
             {
-                response = await completion.Task.WaitAsync(timeout, cancellationToken);
+                response = await completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -261,7 +261,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             }
         }
 
-        await _connectGate.WaitAsync(cancellationToken);
+        await _connectGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             lock (_stateGate)
@@ -280,16 +280,16 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             NamedPipeClientStream stream = new(".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             try
             {
-                await stream.ConnectAsync((int)_timings.ConnectTimeout.TotalMilliseconds, cancellationToken);
+                await stream.ConnectAsync((int)_timings.ConnectTimeout.TotalMilliseconds, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
-                await stream.DisposeAsync();
+                await stream.DisposeAsync().ConfigureAwait(false);
                 throw;
             }
             catch (Exception error) when (error is TimeoutException or IOException or UnauthorizedAccessException)
             {
-                await stream.DisposeAsync();
+                await stream.DisposeAsync().ConfigureAwait(false);
                 throw Break(AgentErrors.Disconnected(_pipeName));
             }
 
@@ -307,26 +307,26 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
             try
             {
-                await HandshakeAsync(stream, reader, writer, cancellationToken);
+                await HandshakeAsync(stream, reader, writer, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer);
+                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
                 throw;
             }
             catch (SessionOperationException error)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer);
+                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
                 throw Break(error);
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer);
+                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
                 throw Break(AgentErrors.Disconnected(_pipeName));
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer);
+                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
                 throw Break(AgentErrors.Protocol(
                     "The child-session agent handshake failed because the peer data could not be read: "
                     + error.GetType().Name
@@ -362,7 +362,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             }
         }
 
-        await stream.DisposeAsync();
+        await stream.DisposeAsync().ConfigureAwait(false);
     }
 
     private async Task HandshakeAsync(
@@ -385,7 +385,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
         _serverStartTimeUtc = serverStartTime;
 
-        string? helloLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken);
+        string? helloLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken).ConfigureAwait(false);
         if (helloLine is null)
         {
             throw AgentErrors.Disconnected(_pipeName);
@@ -405,9 +405,9 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         AgentHandshake.ValidateHello(hello.Event!, _expectedNonce);
 
         int ackId = Interlocked.Increment(ref _nextId);
-        await WriteLineCoreAsync(writer, IpcFrameCodec.WriteRequest(AgentHandshake.CreateHelloAck(ackId)), cancellationToken);
+        await WriteLineCoreAsync(writer, IpcFrameCodec.WriteRequest(AgentHandshake.CreateHelloAck(ackId)), cancellationToken).ConfigureAwait(false);
 
-        string? ackLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken);
+        string? ackLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken).ConfigureAwait(false);
         if (ackLine is null)
         {
             throw AgentErrors.Disconnected(_pipeName);
@@ -442,7 +442,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
     {
         try
         {
-            return await reader.ReadLineAsync(token).AsTask().WaitAsync(_timings.HandshakeTimeout, token);
+            return await reader.ReadLineAsync(token).AsTask().WaitAsync(_timings.HandshakeTimeout, token).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -459,7 +459,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         {
             while (!token.IsCancellationRequested)
             {
-                string? line = await reader.ReadLineAsync(token);
+                string? line = await reader.ReadLineAsync(token).ConfigureAwait(false);
                 if (line is null)
                 {
                     break;
@@ -507,7 +507,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         {
             while (!token.IsCancellationRequested)
             {
-                await Task.Delay(_timings.HeartbeatCheckInterval, token);
+                await Task.Delay(_timings.HeartbeatCheckInterval, token).ConfigureAwait(false);
                 long lastReceived = Interlocked.Read(ref _lastReceivedTimestamp);
                 TimeSpan silence = Stopwatch.GetElapsedTime(lastReceived);
                 if (silence < _timings.HeartbeatSilenceTimeout)
@@ -558,16 +558,16 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             throw Break(AgentErrors.Disconnected(_pipeName));
         }
 
-        await WriteLineCoreAsync(writer, line, cancellationToken);
+        await WriteLineCoreAsync(writer, line, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task WriteLineCoreAsync(StreamWriter writer, string line, CancellationToken cancellationToken)
     {
-        await _writeGate.WaitAsync(cancellationToken);
+        await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await writer.WriteLineAsync(line.AsMemory(), cancellationToken);
-            await writer.FlushAsync(cancellationToken);
+            await writer.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (error is IOException or ObjectDisposedException)
         {

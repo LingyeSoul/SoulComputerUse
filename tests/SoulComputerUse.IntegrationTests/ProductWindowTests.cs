@@ -268,15 +268,38 @@ public sealed class ProductWindowTests
         using ProductWindow surface = CreateWindow(() => false);
 
         window.SetSessionSize(1920, 1080);
-        window.AttachPictureSurface(surface.Handle);
+        window.AttachPictureSurface(surface.Handle, (parent, bounds) => PlaceOnRectangle(parent, surface.Handle, bounds));
 
         Assert.AreEqual(surface.Handle, window.PictureSurface);
         Assert.AreEqual(
             window.PictureBounds,
             ReadWindowRectangleInClientCoordinates(surface.Handle),
             "The surface covers exactly the picture rectangle and never paints over the letterbox.");
+
+        window.SetSessionSize(1024, 768);
+        Assert.AreEqual(
+            window.PictureBounds,
+            ReadWindowRectangleInClientCoordinates(surface.Handle),
+            "A new session size must move and resize the surface with the picture rectangle.");
+
         window.DetachPictureSurface();
         Assert.AreEqual(nint.Zero, window.PictureSurface);
+    }
+
+    private static void PlaceOnRectangle(nint parent, nint handle, Rectangle bounds)
+    {
+        nint style = NativeMethods.GetWindowLongPtrW(handle, NativeMethods.GwlpStyle);
+        _ = NativeMethods.SetWindowLongPtrW(handle, NativeMethods.GwlpStyle, style | (nint)NativeMethods.WsChild);
+        _ = NativeMethods.SetParent(handle, parent);
+        bool placed = NativeMethods.SetWindowPos(
+            handle,
+            0,
+            bounds.Left,
+            bounds.Top,
+            bounds.Width,
+            bounds.Height,
+            NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate);
+        Assert.IsTrue(placed, "The test surface must accept the rectangle it is placed on.");
     }
 
     [TestMethod]

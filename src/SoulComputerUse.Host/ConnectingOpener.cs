@@ -59,6 +59,7 @@ internal sealed class PhaseStatusObserver : ISessionPhaseObserver
 {
     private readonly Func<ProductWindow?> _window;
     private readonly Func<AuthTier?> _authTier;
+    private readonly bool _trace;
 
     internal PhaseStatusObserver(Func<ProductWindow?> window, Func<AuthTier?> authTier)
     {
@@ -66,6 +67,7 @@ internal sealed class PhaseStatusObserver : ISessionPhaseObserver
         ArgumentNullException.ThrowIfNull(authTier);
         _window = window;
         _authTier = authTier;
+        _trace = Environment.GetEnvironmentVariable("SOULCOMPUTERUSE_DIAGNOSTICS") == "1";
     }
 
     /// <inheritdoc />
@@ -75,6 +77,15 @@ internal sealed class PhaseStatusObserver : ISessionPhaseObserver
         if (window is null)
         {
             return;
+        }
+
+        if (_trace)
+        {
+            // The caption is the only signal the operator has while the child session is being brought
+            // up, so a run that appears stuck needs to say which boundary it reached and when.
+            Console.Error.WriteLine(
+                "trace phase=" + SessionStartPhaseNames.ToWireName(phase)
+                + " at=" + DateTime.UtcNow.ToString("HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture));
         }
 
         window.SetStatus(Describe(phase));

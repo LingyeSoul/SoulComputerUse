@@ -1,6 +1,7 @@
 using System;
 using SoulComputerUse.Windows.Hosting.Startup.Phases;
 using SoulComputerUse.Windows.Rdp;
+using SoulComputerUse.Windows.Rdp.Launch;
 using SoulComputerUse.Windows.Rdp.SessionLaunch;
 
 namespace SoulComputerUse.Windows.Hosting.Startup.Split;
@@ -72,10 +73,40 @@ public sealed class SessionConnectionOpener : ISessionConnectionOpener
     /// <summary>
     /// Judges the gate and then asks the connector to open the connection on the hosted control.
     /// </summary>
+    /// <remarks>
+    /// With diagnostics on, the alternate-shell properties are read back after the connection opened. A
+    /// client that clears them at connect time would leave the child session running the usual shell, and
+    /// no agent would ever appear; the read-back is what tells that apart from an agent that failed later.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The gate refuses the connection, or the control refuses to open it.</exception>
     public void Open()
     {
         ConnectionGate gate = _connector.PrepareGate();
         _connector.Open(_controlSurface.Ocx, _desktopWidth, _desktopHeight, gate);
+        TraceAlternateShellAfterConnect();
+    }
+
+    private void TraceAlternateShellAfterConnect()
+    {
+        if (Environment.GetEnvironmentVariable("SOULCOMPUTERUSE_DIAGNOSTICS") != "1")
+        {
+            return;
+        }
+
+        try
+        {
+            DynamicRdpLaunchSurface surface = new(_controlSurface.Ocx);
+            string startProgram = surface.StartProgram;
+            Console.Error.WriteLine(
+                "trace alternate-shell-after-connect configured=" + (startProgram.Length > 0 ? "yes" : "no")
+                + " length=" + startProgram.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // A property that cannot be read after the connection is itself the answer, so it is reported
+            // instead of being treated as an ordinary failure of the connection step.
+            Console.Error.WriteLine(
+                "trace alternate-shell-after-connect unreadable type=" + error.GetType().Name);
+        }
     }
 }

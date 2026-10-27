@@ -434,9 +434,11 @@ public sealed class LeftoverChildSessionGateAdversarialTests
                 }
             }
 
+            // A leftover child session legitimately reports an empty station name once its client is gone,
+            // so an empty name is a readable record and not a parse failure.
             Assert.IsTrue(
-                id.HasValue && state.HasValue && stationName.Length > 0,
-                $"A session record could not be read as an id, a state and a station: {line}");
+                id.HasValue && state.HasValue,
+                $"A session record could not be read as an id and a state: {line}");
 
             return new SessionCandidate(id.Value, stationName, state.Value);
         }

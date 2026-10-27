@@ -137,7 +137,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
 
         if (acceptLoop is not null)
         {
-            await acceptLoop;
+            await acceptLoop.ConfigureAwait(false);
         }
 
         Task[] connections;
@@ -149,7 +149,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
 
         foreach (Task connection in connections)
         {
-            await connection;
+            await connection.ConfigureAwait(false);
         }
 
         _shutdown.Dispose();
@@ -171,7 +171,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                 bool connected = false;
                 try
                 {
-                    await stream.WaitForConnectionAsync(token);
+                    await stream.WaitForConnectionAsync(token).ConfigureAwait(false);
                     connected = true;
                 }
                 catch (Exception error) when (error is OperationCanceledException or ObjectDisposedException)
@@ -183,7 +183,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                     if (!connected)
                     {
                         ClearListeningPipe(stream);
-                        await stream.DisposeAsync();
+                        await stream.DisposeAsync().ConfigureAwait(false);
                     }
                 }
 
@@ -200,7 +200,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
             if (pending is not null)
             {
                 ClearListeningPipe(pending);
-                await pending.DisposeAsync();
+                await pending.DisposeAsync().ConfigureAwait(false);
             }
         }
     }
@@ -245,12 +245,12 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         {
             try
             {
-                if (!await TryVerifyPeerAsync(stream, token))
+                if (!await TryVerifyPeerAsync(stream, token).ConfigureAwait(false))
                 {
                     return;
                 }
 
-                await HandleConnectionAsync(stream, token);
+                await HandleConnectionAsync(stream, token).ConfigureAwait(false);
             }
             catch (IOException)
             {
@@ -280,7 +280,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         }
         catch (SessionOperationException error)
         {
-            await TryWriteAsync(stream, OwnerPipeRefusals.Peer(error.Message), token);
+            await TryWriteAsync(stream, OwnerPipeRefusals.Peer(error.Message), token).ConfigureAwait(false);
             return false;
         }
     }
@@ -299,7 +299,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
 
         while (!token.IsCancellationRequested)
         {
-            OwnerFrameReadResult read = await reader.ReadLineAsync(token);
+            OwnerFrameReadResult read = await reader.ReadLineAsync(token).ConfigureAwait(false);
             if (read.Status == OwnerFrameReadStatus.EndOfStream)
             {
                 break;
@@ -308,7 +308,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
             if (read.Status == OwnerFrameReadStatus.FrameTooLong)
             {
                 // The line was refused while it was being read, so no request id can be recovered.
-                await TryWriteAsync(writer, writeGate, OwnerPipeRefusals.FrameTooLong(), token);
+                await TryWriteAsync(writer, writeGate, OwnerPipeRefusals.FrameTooLong(), token).ConfigureAwait(false);
                 return;
             }
 
@@ -323,7 +323,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                         writer,
                         writeGate,
                         IpcResponse.CreateFailure(parsed.RecoveredId ?? 0, IpcError.Protocol(parsed.ErrorMessage!)),
-                        token);
+                        token).ConfigureAwait(false);
                     return;
                 default:
                     await TryWriteAsync(
@@ -332,12 +332,12 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                         IpcResponse.CreateFailure(
                             parsed.RecoveredId ?? 0,
                             IpcError.Protocol("The owner pipe received a frame that is not a request.")),
-                        token);
+                        token).ConfigureAwait(false);
                     return;
             }
         }
 
-        await Task.WhenAll(requests);
+        await Task.WhenAll(requests).ConfigureAwait(false);
     }
 
     private async Task HandleRequestAsync(
@@ -355,17 +355,17 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         }
         else
         {
-            response = await RunHandlerAsync(tool, request, token);
+            response = await RunHandlerAsync(tool, request, token).ConfigureAwait(false);
         }
 
-        await TryWriteAsync(writer, writeGate, response, token);
+        await TryWriteAsync(writer, writeGate, response, token).ConfigureAwait(false);
     }
 
     private async Task<IpcResponse> RunHandlerAsync(SessionTool tool, IpcRequest request, CancellationToken token)
     {
         try
         {
-            SessionToolResult result = await _handler.HandleAsync(tool, request.Parameters, token);
+            SessionToolResult result = await _handler.HandleAsync(tool, request.Parameters, token).ConfigureAwait(false);
             if (result.Succeeded)
             {
                 JsonElement payload = result.Result ?? SessionToolPayloads.EmptyArguments();
@@ -404,7 +404,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
     {
         try
         {
-            await WriteAsync(writer, writeGate, response, token);
+            await WriteAsync(writer, writeGate, response, token).ConfigureAwait(false);
         }
         catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException)
         {
@@ -426,8 +426,8 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                 NewLine = "\n",
             };
 
-            await writer.WriteLineAsync(IpcFrameCodec.WriteResponse(response).AsMemory(), token);
-            await writer.FlushAsync(token);
+            await writer.WriteLineAsync(IpcFrameCodec.WriteResponse(response).AsMemory(), token).ConfigureAwait(false);
+            await writer.FlushAsync(token).ConfigureAwait(false);
         }
         catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException)
         {
@@ -442,11 +442,11 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         CancellationToken token)
     {
         string line = IpcFrameCodec.WriteResponse(response);
-        await writeGate.WaitAsync(token);
+        await writeGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            await writer.WriteLineAsync(line.AsMemory(), token);
-            await writer.FlushAsync(token);
+            await writer.WriteLineAsync(line.AsMemory(), token).ConfigureAwait(false);
+            await writer.FlushAsync(token).ConfigureAwait(false);
         }
         finally
         {

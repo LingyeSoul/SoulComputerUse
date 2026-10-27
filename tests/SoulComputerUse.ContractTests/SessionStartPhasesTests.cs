@@ -189,9 +189,9 @@ public sealed class SessionStartPhasesTests
         CollectionAssert.AreEqual(new List<string> { "before-connect", "open" }, run.Calls);
         Assert.AreEqual(0, run.AfterLogon.Count, "A connection that did not open must never be followed by an agent attach.");
         CollectionAssert.AreEqual(
-            new List<SessionStartPhase> { SessionStartPhase.BeforeConnect },
+            new List<SessionStartPhase> { SessionStartPhase.BeforeConnect, SessionStartPhase.AwaitingCredentials },
             run.Observer.Phases.ToList(),
-            "The window never reached the logon screen, so no later phase may be announced.");
+            "The window shows the logon screen while the connection is opened, so the caption announces that phase before the attempt; the run then stops there and no later phase may be announced.");
 
         Assert.AreSame(
             run.BeforeConnect.Handle,

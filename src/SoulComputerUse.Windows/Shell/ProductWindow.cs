@@ -120,22 +120,40 @@ public sealed class ProductWindow : IDisposable
     }
 
     /// <summary>
-    /// Attaches the window that renders the desktop picture. It becomes a child of this window and is
-    /// placed exactly on <see cref="PictureBounds"/>, so the letterbox is never painted over.
+    /// Adopts the window that renders the desktop picture and keeps it exactly on
+    /// <see cref="PictureBounds"/>, so the letterbox is never painted over.
     /// </summary>
-    public void AttachPictureSurface(nint surface)
+    /// <remarks>
+    /// <para>
+    /// The surface owns its own window tree, so it parents and positions itself through
+    /// <paramref name="adopt"/>; this window only decides the rectangle. That split matters because the
+    /// remote desktop picture is a hosted ActiveX control inside a Windows Forms carrier: only the surface
+    /// knows that the window to adopt is the carrier and that the control must stay docked inside it.
+    /// Reparenting a bare ActiveX control window from here would leave the control outside the layer that
+    /// owns its layout, which is how the picture came to cover the caption strip.
+    /// </para>
+    /// <para>
+    /// The callback runs again whenever <see cref="SetSessionSize"/> or the client area changes, so the
+    /// picture follows the window instead of being placed once.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">The adoption callback is null.</exception>
+    /// <exception cref="ArgumentException">The surface handle is zero.</exception>
+    public void AttachPictureSurface(nint surface, Action<nint, Rectangle> adopt)
     {
+        ArgumentNullException.ThrowIfNull(adopt);
         if (surface == 0)
         {
             throw new ArgumentException("The picture surface handle must not be zero.", nameof(surface));
         }
 
         nint handle = RequireHandle();
-        _ = NativeMethods.SetWindowLongPtrW(surface, NativeMethods.GwlpStyle, (nint)NativeMethods.WsChild);
-        _ = NativeMethods.SetParent(surface, handle);
         _pictureSurface = surface;
-        RepositionPictureSurface();
+        _adoptPicture = adopt;
+        adopt(handle, PictureBounds);
     }
+
+    private Action<nint, Rectangle>? _adoptPicture;
 
     /// <summary>Detaches the picture surface without destroying it.</summary>
     public void DetachPictureSurface()
@@ -146,6 +164,7 @@ public sealed class ProductWindow : IDisposable
         }
 
         _pictureSurface = 0;
+        _adoptPicture = null;
     }
 
     /// <summary>The title the caption currently shows.</summary>
@@ -334,6 +353,21 @@ public sealed class ProductWindow : IDisposable
         }
     }
 
+    /// <summary>
+    /// The <c>SC_SIZE</c> argument for one resize handle.
+    /// </summary>
+    /// <remarks>
+    /// <c>SC_SIZE</c> carries the edge in its low four bits, and the four edge and four corner codes happen
+    /// to be the same small numbers in the same order as the <c>HTLEFT</c> family, which is why the hit code
+    /// can be reduced to its offset inside that family. <c>HTCAPTION</c> is the family's base, so the offset
+    /// is <c>hitTestCode - HTCAPTION</c>.
+    /// </remarks>
+    /// <param name="hitTestCode">The hit code of the pressed resize handle.</param>
+    private static int ResizeCode(int hitTestCode)
+    {
+        return hitTestCode - NativeMethods.HtCaption;
+    }
+
     private static nint HandleWindowMessage(nint handle, uint message, nint wParam, nint lParam)
     {
         OpenWindows.TryGetValue(handle, out ProductWindow? window);
@@ -397,9 +431,12 @@ public sealed class ProductWindow : IDisposable
                 window.RequestClose(handle);
                 return 0;
             case NativeMethods.WmDestroy:
-                if (window is not null)
                 {
-                    window._destroyed = true;
+                    if (window is not null)
+                    {
+                        window._destroyed = true;
+                    }
+
                     OpenWindows.Remove(handle);
                 }
 
@@ -632,9 +669,12 @@ public sealed class ProductWindow : IDisposable
         CaptionButtonKind? kind = CaptionHitTest.ButtonFromHitTestCode(hitTestCode);
         if (kind is null)
         {
-            // Everything that is not a caption button keeps the default behaviour, which is what
-            // makes dragging the strip and double-click-to-maximize work.
-            return NativeMethods.DefWindowProcW(handle, NativeMethods.WmNcLButtonDown, hitTestCode, packedPoint);
+            // The window has no non-client area at all, so the default procedure has nothing to grab: it
+            // answers a caption hit code by looking for the frame it would have drawn, finds none, and the
+            // button press ends without any window being captured. Dragging and resizing are therefore
+            // started here, by handing the system the same command it would issue for a real frame.
+            RequestWindowMoveOrResize(handle, hitTestCode);
+            return 0;
         }
 
         _pressedButton = kind;
@@ -642,6 +682,50 @@ public sealed class ProductWindow : IDisposable
         _ = NativeMethods.SetCapture(handle);
         RequestRepaint();
         return 0;
+    }
+
+    /// <summary>
+    /// Starts the system's own move or resize loop for a press on the caption strip or a resize handle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>DefWindowProc</c> cannot do this for this window. It answers <c>WM_NCLBUTTONDOWN</c> by capturing
+    /// the pointer and starting the move loop for the non-client area it owns, and this window reports a
+    /// zero non-client area so that the client area covers the whole frame. The press is then dropped: no
+    /// window is captured, and the window can neither be dragged nor resized even though the hit test
+    /// reports <c>HTCAPTION</c> and the style bits are all present.
+    /// </para>
+    /// <para>
+    /// Releasing the capture first matters: the system's loop takes the pointer itself, and a window that
+    /// still holds the capture never sees the mouse move that would begin the drag.
+    /// </para>
+    /// </remarks>
+    /// <param name="handle">The window that received the press.</param>
+    /// <param name="hitTestCode">The hit code the press carried.</param>
+    private static void RequestWindowMoveOrResize(nint handle, int hitTestCode)
+    {
+        int command;
+        switch (hitTestCode)
+        {
+            case NativeMethods.HtCaption:
+                command = NativeMethods.ScMove;
+                break;
+            case NativeMethods.HtLeft:
+            case NativeMethods.HtRight:
+            case NativeMethods.HtTop:
+            case NativeMethods.HtBottom:
+            case NativeMethods.HtTopLeft:
+            case NativeMethods.HtTopRight:
+            case NativeMethods.HtBottomLeft:
+            case NativeMethods.HtBottomRight:
+                command = NativeMethods.ScSize + ResizeCode(hitTestCode);
+                break;
+            default:
+                return;
+        }
+
+        _ = NativeMethods.ReleaseCapture();
+        _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSysCommand, command, handle);
     }
 
     /// <summary>Completes the press cycle after a non-client button release.</summary>
@@ -773,6 +857,13 @@ public sealed class ProductWindow : IDisposable
     }
 
     /// <summary>Recomputes where the picture goes; the rest of the client area is the black letterbox.</summary>
+    /// <remarks>
+    /// The picture is fitted into the area below the caption strip, never into the whole client area. The
+    /// caption is painted inside the client area, so a rectangle measured from its top would put the remote
+    /// desktop over the title bar: the window would then look like it had no title bar at all, and the
+    /// eight-pixel resize border would be swallowed by the control, which makes the window impossible to
+    /// drag or resize.
+    /// </remarks>
     private void RecomputePictureBounds()
     {
         if (_sessionWidth <= 0 || _sessionHeight <= 0)
@@ -787,29 +878,39 @@ public sealed class ProductWindow : IDisposable
             return;
         }
 
-        PictureBounds = DesktopPictureLayout.Fit(
-            clientRectangle.Right - clientRectangle.Left,
-            clientRectangle.Bottom - clientRectangle.Top,
-            _sessionWidth,
-            _sessionHeight);
+        int clientWidth = clientRectangle.Right - clientRectangle.Left;
+        int clientHeight = clientRectangle.Bottom - clientRectangle.Top;
+        int captionHeight = _metrics.Height;
+
+        // The resize border is kept reachable on every side. A child window owns every point inside its
+        // rectangle, so a picture that reaches the window edge takes the hit test with it and the window
+        // can no longer be resized or, along the top, dragged.
+        int border = CaptionMetrics.Scale(WindowFrameHitTest.ResizeBorderPixels, _metrics.Dpi);
+        int availableHeight = clientHeight - captionHeight - border;
+        int availableWidth = clientWidth - (border * 2);
+        if (availableHeight <= 0 || availableWidth <= 0)
+        {
+            PictureBounds = Rectangle.Empty;
+            return;
+        }
+
+        Rectangle fitted = DesktopPictureLayout.Fit(availableWidth, availableHeight, _sessionWidth, _sessionHeight);
+        PictureBounds = new Rectangle(
+            fitted.Left + border,
+            fitted.Top + captionHeight,
+            fitted.Width,
+            fitted.Height);
     }
 
     /// <summary>Puts the picture surface exactly on the picture rectangle, never on the letterbox.</summary>
     private void RepositionPictureSurface()
     {
-        if (_pictureSurface == 0 || PictureBounds.IsEmpty)
+        if (_pictureSurface == 0 || _adoptPicture is null)
         {
             return;
         }
 
-        _ = NativeMethods.SetWindowPos(
-            _pictureSurface,
-            0,
-            PictureBounds.Left,
-            PictureBounds.Top,
-            PictureBounds.Width,
-            PictureBounds.Height,
-            NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate);
+        _adoptPicture(_handle, PictureBounds);
     }
 
     private void ApplyDpiChange(nint handle, nint wParam, nint lParam)

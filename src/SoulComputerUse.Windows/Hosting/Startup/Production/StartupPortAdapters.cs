@@ -27,9 +27,13 @@ public sealed class ProductionLockAcquire : ISingleInstanceLockAcquire
 public sealed class ProductionLeftoverSweep : ILeftoverSweep
 {
     /// <inheritdoc />
+    /// <remarks>
+    /// The settle really waits: Windows finishes a logoff asynchronously, and a session that is still
+    /// listed a moment after a successful request is not a leftover that survived.
+    /// </remarks>
     public LeftoverSweepReport Sweep()
     {
-        return new LeftoverSweeper(new WtsSessionTable()).Sweep();
+        return new LeftoverSweeper(new WtsSessionTable(), new ThreadLogoffSettle()).Sweep();
     }
 }
 

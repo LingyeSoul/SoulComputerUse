@@ -147,6 +147,13 @@ public sealed class SessionStartPhaseRunner
         List<SessionStartPhase> phases,
         List<SessionPhaseFailure> failures)
     {
+        // The opener opens the connection and then waits for the operator's logon, so the window is
+        // showing the Windows logon screen for the whole call. Reporting the awaiting-credentials phase
+        // before the call is what makes the caption say so while the operator is looking at it; reporting
+        // it afterwards would leave the caption on "starting" exactly when it matters, and the phase
+        // boundary would arrive only once the wait had already ended.
+        Enter(SessionStartPhase.AwaitingCredentials, phases, failures);
+
         try
         {
             _connectionOpener.Open();
@@ -160,8 +167,6 @@ public sealed class SessionStartPhaseRunner
             failure.Data[BeforeConnectDataKey] = beforeConnect;
             throw failure;
         }
-
-        Enter(SessionStartPhase.AwaitingCredentials, phases, failures);
     }
 
     private void RunAfterLogon(List<SessionStartPhase> phases, List<SessionPhaseFailure> failures)

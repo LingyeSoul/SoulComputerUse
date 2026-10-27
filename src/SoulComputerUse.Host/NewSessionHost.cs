@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Startup;
@@ -38,9 +40,7 @@ namespace SoulComputerUse.Host;
 internal sealed class NewSessionHost : IDisposable
 {
     /// <summary>The desktop the connection requests, in the session's native pixels.</summary>
-    private const int DesktopWidth = 1280;
-
-    private const int DesktopHeight = 800;
+    private static readonly (int Width, int Height) Desktop = SessionDesktopSize.PrimaryDisplay();
 
     /// <summary>How long the elevation helper may take before the prompt counts as stuck.</summary>
     private const int ElevationTimeoutMilliseconds = 60000;
@@ -77,6 +77,25 @@ internal sealed class NewSessionHost : IDisposable
     internal string SessionId => _plan.SessionId;
 
     /// <summary>Runs the whole mode on this thread and returns the process exit code.</summary>
+    /// <remarks>
+    /// <para>
+    /// The split between this thread and the start thread is what makes the window usable while the session
+    /// is being brought up. Everything that talks to the control has to run here, because an ActiveX control
+    /// belongs to the thread that created it: it is created, attached and driven from this thread only.
+    /// </para>
+    /// <para>
+    /// The three start phases, however, block: the connection waits for the operator's logon and the
+    /// after-logon segment waits for the agent's pipe. Running them here would leave this thread inside a
+    /// synchronous wait, and this thread is the one that has to dispatch the window messages a drag, a
+    /// resize or a minimize needs; the window would look correct and answer <c>HTCAPTION</c> while every
+    /// real click did nothing. They therefore run on their own thread, and this thread enters the message
+    /// loop immediately after the window exists.
+    /// </para>
+    /// <para>
+    /// The start thread never touches the control directly. The connected-state reader it needs is posted to
+    /// this thread, so the control is still only ever read from its own thread.
+    /// </para>
+    /// </remarks>
     internal int Run()
     {
         try
@@ -110,7 +129,7 @@ internal sealed class NewSessionHost : IDisposable
 
     private ProductWindow? _productWindow;
 
-    /// <summary>Builds the ports, shows the window and runs the three phases.</summary>
+    /// <summary>Runs the three start phases on this thread and records their outcome.</summary>
     private void Launch()
     {
         AgentLaunchRequest launchRequest = _plan.CreateAgentLaunchRequest();
@@ -123,7 +142,7 @@ internal sealed class NewSessionHost : IDisposable
         ProductionOwnerPipeHost ownerPipe = new();
         _ownerPipe = ownerPipe;
 
-        BeforeConnectSegment beforeConnect = new(
+        CapturingBeforeConnect capturing = new(new BeforeConnectSegment(
             _options,
             new ProductionLockAcquire(),
             _recordStore,
@@ -132,22 +151,38 @@ internal sealed class NewSessionHost : IDisposable
             new ProductionChildSessionsGate(_plan.ApplicationDirectory, ElevationTimeoutMilliseconds),
             launchRequest,
             surface,
-            new DynamicRdpLaunchSurface(surface.Ocx));
-        CapturingBeforeConnect capturing = new(beforeConnect);
+            new DynamicRdpLaunchSurface(surface.Ocx)));
         _beforeConnect = capturing;
+
+        // The window must exist before the connection: the control needs a parent to be attached to, and
+        // the operator must see the logon screen the moment the client shows it.
+        ShowProductWindow(surface);
+
+        // Every wait in the start hands this clock over to the message pump, so the window keeps answering
+        // while the phases block. A plain sleep anywhere on this thread would freeze the caption, the
+        // remote desktop control and every click the operator makes while the session is being brought up.
+        PumpingWaitClock waitClock = new(() => _productWindow is null || _productWindow.IsDestroyed);
         _afterLogon = new DeferredAfterLogon(
             capturing,
             result => new AfterLogonSegment(
                 _options,
                 _recordStore,
-                new ProductionAgentConnector(_plan.SessionId, _plan.Nonce, AgentClientTimings.Contract),
+                new ProductionAgentConnector(
+                    _plan.SessionId,
+                    _plan.Nonce,
+                    AgentClientTimings.Contract,
+                    waitClock),
                 ownerPipe,
                 new WindowsProcessSessionLookup(),
                 result));
 
-        // The window must exist before the connection: the control needs a parent to be attached to, and
-        // the operator must see the logon screen the moment the client shows it.
-        ShowProductWindow(surface);
+        // The session snapshot is taken before the connection: the one session id that appears afterwards
+        // is the session this run created, so no leftover or another account's session can answer the logon
+        // question. Windows puts a fresh child session's own logon screen inside that session, so the user
+        // name Windows publishes after accepting a logon is the proof that the operator did the logon.
+        _logonTracker = ChildSessionLogonTracker.Start(
+            new WtsSessionSource(),
+            WtsSessionProbe.GetActiveConsoleSessionId());
 
         SessionStartPhaseRunner runner = new(
             capturing,
@@ -158,11 +193,11 @@ internal sealed class NewSessionHost : IDisposable
                     _plan.DesktopWidth,
                     _plan.DesktopHeight),
                 new SessionConnectionWaiter(
-                    () => surface.ConnectedState,
+                    () => ReadConnectedState(surface),
                     LogonPollInterval,
                     LogonTimeout,
-                    new PumpingWaitClock(() => _productWindow is null || _productWindow.IsDestroyed),
-                    ChildSessionHasLoggedOnUser)),
+                    waitClock,
+                    _logonTracker)),
             _afterLogon,
             new PhaseStatusObserver(() => _productWindow, () => capturing.AuthTier));
 
@@ -183,8 +218,8 @@ internal sealed class NewSessionHost : IDisposable
             Guid.NewGuid().ToString("D"),
             AgentNonce.Create(),
             AppContext.BaseDirectory,
-            DesktopWidth,
-            DesktopHeight,
+            Desktop.Width,
+            Desktop.Height,
             connectToChildSession: true,
             SessionLabel);
     }
@@ -226,8 +261,16 @@ internal sealed class NewSessionHost : IDisposable
             status);
         _productWindow = window;
         window.SetSessionSize(_plan.DesktopWidth, _plan.DesktopHeight);
-        window.AttachPictureSurface(surface.WindowHandle);
+        window.AttachPictureSurface(surface.WindowHandle, surface.Adopt);
         surface.Show();
+
+        if (_diagnostics)
+        {
+            Console.Error.WriteLine(
+                "trace picture-surface=" + surface.WindowHandle.ToInt64().ToString(CultureInfo.InvariantCulture)
+                + " adopted=" + window.PictureSurface.ToInt64().ToString(CultureInfo.InvariantCulture)
+                + " picture=" + DescribePicture());
+        }
     }
 
     /// <summary>Runs the contract's shutdown sequence and returns the exit code it produced.</summary>
@@ -238,8 +281,10 @@ internal sealed class NewSessionHost : IDisposable
 
         if (!_started || beforeConnect is null || agent is null)
         {
-            // Nothing reached ready, so the only thing that can still be held is the lock the refused
-            // phase already released; the window and the control are all that is left here.
+            // Nothing reached ready, so the contract's teardown sequence does not apply: the refused phase
+            // already released the lock and the record. What must not survive is a child session this run
+            // created, because it answers the next connection without asking the operator to log on.
+            ReleaseUnfinishedChildSession();
             Dispose();
             return 0;
         }
@@ -286,26 +331,123 @@ internal sealed class NewSessionHost : IDisposable
     }
 
     /// <summary>
-    /// Reports whether any session other than the console one already has a logged-on user. The client asks
-    /// the operator for credentials itself, so the child session never paints its own logon screen and the
-    /// connected state goes straight from connecting to connected; a non-empty user name in a child session
-    /// is then the proof that Windows accepted a logon. The query never surfaces the name itself.
+    /// Reads the control's connected state and, with diagnostics on, writes the facts the logon gate decides
+    /// on whenever one of them changes: the state the client reports, the child session this run created and
+    /// whether Windows has published a user for it. Only numbers and yes/no are written, so a trail can be
+    /// pasted into a report without a path, an account or a machine name.
     /// </summary>
-    private static bool ChildSessionHasLoggedOnUser()
+    private int ReadConnectedState(RdpControlSurface surface)
     {
+        int state = surface.ConnectedState;
+        if (!_diagnostics)
+        {
+            return state;
+        }
+
+        int createdSessionId = _logonTracker?.CreatedSessionId ?? 0;
+        bool loggedOn = _logonTracker?.HasLoggedOnUser() ?? false;
+        (int State, int CreatedSessionId, bool LoggedOn) facts = (state, createdSessionId, loggedOn);
+        if (facts != _lastTracedFacts)
+        {
+            _lastTracedFacts = facts;
+            Console.Error.WriteLine(
+                "trace connected-state=" + state.ToString(CultureInfo.InvariantCulture)
+                + " created-child-session=" + createdSessionId.ToString(CultureInfo.InvariantCulture)
+                + " logged-on=" + (loggedOn ? "yes" : "no")
+                + " picture=" + DescribePicture());
+        }
+
+        return state;
+    }
+
+    private (int State, int CreatedSessionId, bool LoggedOn)? _lastTracedFacts;
+
+    private readonly bool _diagnostics =
+        Environment.GetEnvironmentVariable("SOULCOMPUTERUSE_DIAGNOSTICS") == "1";
+
+    private string DescribePicture()
+    {
+        ProductWindow? window = _productWindow;
+        if (window is null)
+        {
+            return "none";
+        }
+
+        return window.PictureBounds.Width.ToString(CultureInfo.InvariantCulture)
+            + "x" + window.PictureBounds.Height.ToString(CultureInfo.InvariantCulture)
+            + "@" + window.PictureBounds.Left.ToString(CultureInfo.InvariantCulture)
+            + "," + window.PictureBounds.Top.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>How long the abort path waits for the child session's logoff to take effect.</summary>
+    private static readonly TimeSpan LogoffConfirmationInterval = TimeSpan.FromMilliseconds(250);
+
+    private const int LogoffConfirmationAttempts = 60;
+
+    /// <summary>
+    /// Logs off the child session this run created when the start never reached ready. A session left
+    /// logged on answers the next connection without asking the operator to log on, which the contract
+    /// makes a hard precondition rather than a warning, so the cleanup runs on the abort path too and
+    /// reports itself when the logoff cannot be confirmed.
+    /// </summary>
+    private void ReleaseUnfinishedChildSession()
+    {
+        int createdSessionId = _logonTracker?.CreatedSessionId ?? 0;
+        if (createdSessionId <= 0)
+        {
+            return;
+        }
+
         try
         {
-            return WtsSessionUserQuery.AnyChildSessionHasLoggedOnUser(WtsSessionProbe.GetActiveConsoleSessionId());
+            WtsSessionTable table = new();
+            table.LogOff(createdSessionId);
+
+            // A Windows logoff is asynchronous: the session stays listed for several seconds after a
+            // request that succeeded, so the confirmation has to be repeated instead of read once.
+            ThreadLogoffSettle settle = new();
+            bool stillListed = true;
+            for (int attempt = 0; attempt < LogoffConfirmationAttempts && stillListed; attempt++)
+            {
+                stillListed = false;
+                foreach (WtsSessionEntry entry in table.Read())
+                {
+                    if (entry.Id == createdSessionId)
+                    {
+                        stillListed = true;
+                        break;
+                    }
+                }
+
+                if (stillListed)
+                {
+                    settle.Wait(LogoffConfirmationInterval);
+                }
+            }
+
+            if (stillListed)
+            {
+                throw new InvalidOperationException(
+                    $"Session {createdSessionId} is still listed after the logoff request.");
+            }
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            // A failed query must not be read as "nobody logged on": that would turn a real logon into a
-            // bypass refusal. The gate therefore falls back to the logon-screen evidence only.
-            return false;
+            // Never silent: the leftover silently disables the logon gate of the next run, so the operator
+            // has to be able to see this line without turning diagnostics on.
+            Console.Error.WriteLine(
+                SessionErrorCodeNames.ToWireName(SessionErrorCode.ManualIntervention)
+                + " The child session this run created could not be confirmed as logged off, so the next"
+                + " connection may skip the logon gate. Session id "
+                + createdSessionId.ToString(CultureInfo.InvariantCulture)
+                + "; cause: " + error.Message);
         }
     }
 
-    private static int ReadChildSessionId(int agentProcessId)    {
+    private ChildSessionLogonTracker? _logonTracker;
+
+    private static int ReadChildSessionId(int agentProcessId)
+    {
         if (agentProcessId <= 0)
         {
             return 0;
@@ -329,7 +471,8 @@ internal sealed class NewSessionHost : IDisposable
         return CloseConfirmationDialog.Confirm(window.Handle, CloseConfirmationConfig.Default);
     }
 
-    private static string DescribeFailure(Exception error)
+    /// <summary>Describes a failure at the process boundary.</summary>
+    private string DescribeFailure(Exception error)
     {
         // The process boundary: report the contract code and the fixed explanation, never a stack trace,
         // whose absolute paths the log whitelist forbids.
@@ -343,15 +486,28 @@ internal sealed class NewSessionHost : IDisposable
         };
 
         // Diagnostics are off by default because an inner failure may name a path. A developer who needs the
-        // cause sets the variable and reads the chain from the error stream of that one run.
+        // cause sets the variable and reads the chain from the error stream of that one run, together with
+        // the two facts the logon gate decided on: the session this run created and whether Windows had
+        // published a user for it by the time the run ended.
         if (Environment.GetEnvironmentVariable("SOULCOMPUTERUSE_DIAGNOSTICS") == "1")
         {
             Exception? current = error;
             while (current is not null)
             {
                 described += Environment.NewLine + "  " + current.GetType().Name + ": " + current.Message;
+                if (current.Data.Contains(SessionConnectionWaiter.ObservedStatesDataKey)
+                    && current.Data[SessionConnectionWaiter.ObservedStatesDataKey] is IReadOnlyList<int> observed)
+                {
+                    described += Environment.NewLine + "  observed connected states: " + string.Join(",", observed);
+                }
+
                 current = current.InnerException;
             }
+
+            described += Environment.NewLine
+                + "  created child session: "
+                + (_logonTracker?.CreatedSessionId ?? 0).ToString(CultureInfo.InvariantCulture)
+                + ", logged on: " + ((_logonTracker?.HasLoggedOnUser() ?? false) ? "yes" : "no");
         }
 
         return described;

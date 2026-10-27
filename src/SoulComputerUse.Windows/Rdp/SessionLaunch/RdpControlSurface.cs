@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using Interop = SoulComputerUse.Windows.Native.NativeMethods;
 
 namespace SoulComputerUse.Windows.Rdp.SessionLaunch;
 
@@ -31,7 +32,12 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
     private readonly RdpControlHost _control;
     private bool _disposed;
 
-    /// <summary>Creates the surface, its hidden carrier and one ActiveX host for the control.</summary>
+    /// <summary>Creates the surface, its carrier and one ActiveX host for the control.</summary>
+    /// <remarks>
+    /// The carrier is an ordinary window that is parented to the product window later, so nothing here
+    /// decides where the picture appears. It starts hidden and one pixel wide only so its handle exists
+    /// before the control needs a parent; both are replaced by the picture rectangle.
+    /// </remarks>
     public RdpControlSurface()
     {
         _carrier = new Form
@@ -49,7 +55,8 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
         };
         _carrier.Controls.Add(_control);
 
-        // The carrier is never shown, but its handle must exist before the control can create its own.
+        // The carrier is never shown on its own, but its handle must exist before the control can create
+        // its own, and the product window needs a real handle to adopt.
         _ = _carrier.Handle;
     }
 
@@ -76,12 +83,18 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// The handle this returns is the carrier's. The remote desktop control is docked inside it, and
+    /// Windows Forms owns that control's placement; handing out the control's own window would let a caller
+    /// reparent it away from the layout that sizes it, which is how the picture came to cover the caption.
+    /// </remarks>
     public nint WindowHandle
     {
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return _control.Handle;
+            _ = _control.Handle;
+            return _carrier.Handle;
         }
     }
 
@@ -99,12 +112,79 @@ public sealed class RdpControlSurface : IRdpControlSurface, IDisposable
         }
     }
 
-    /// <summary>Shows the control after the product window adopted it as its picture surface.</summary>
+    /// <summary>
+    /// Parents the carrier to the product window and keeps it exactly on the picture rectangle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The carrier is what gets adopted, not the control. The control is docked inside the carrier and
+    /// Windows Forms owns its placement; reparenting the control itself would put it outside the layer that
+    /// sizes it, and the picture would then sit at the product window's origin and cover the caption strip
+    /// and the resize border. Once the carrier is a child of the product window, its bounds are already in
+    /// the coordinate space the picture rectangle uses.
+    /// </para>
+    /// <para>
+    /// The carrier's frame is removed before it is reparented, because a reparented window must not keep the
+    /// border and caption of a top-level one.
+    /// </para>
+    /// </remarks>
+    /// <param name="parent">The product window's handle.</param>
+    /// <param name="bounds">The picture rectangle, in the product window's client coordinates.</param>
+    /// <exception cref="ObjectDisposedException">The surface was already disposed.</exception>
+    public void Adopt(nint parent, Rectangle bounds)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (parent == 0)
+        {
+            throw new ArgumentException("The parent window handle must not be zero.", nameof(parent));
+        }
+
+        nint carrier = _carrier.Handle;
+        nint style = Interop.GetWindowLongPtrW(carrier, Interop.GwlpStyle);
+
+        // A child window must carry WS_CHILD and must not carry WS_POPUP, which is the style a WinForms Form
+        // is created with. The visible bit is kept, because the picture is shown as soon as it is attached.
+        long childStyle = (style.ToInt64() & ~Interop.WsPopup) | Interop.WsChild | Interop.WsVisible;
+        _ = Interop.SetWindowLongPtrW(carrier, Interop.GwlpStyle, (nint)childStyle);
+
+        if (Interop.GetParent(carrier) != parent)
+        {
+            _ = Interop.SetParent(carrier, parent);
+        }
+
+        _ = Interop.SetWindowPos(
+            carrier,
+            0,
+            bounds.Left,
+            bounds.Top,
+            bounds.Width,
+            bounds.Height,
+            Interop.SwpNoZOrder | Interop.SwpNoActivate | Interop.SwpNoSendChanging);
+
+        _control.Visible = true;
+    }
+
+    /// <summary>
+    /// Shows the control after the product window adopted it as its picture surface.
+    /// </summary>
+    /// <remarks>
+    /// The managed <c>Visible</c> flag alone is not enough here. The control's managed parent is the hidden
+    /// carrier, and Windows Forms keeps a child of a hidden window hidden: it never writes the visible style
+    /// bit, so the window the product window adopted stays invisible and its client area renders black while
+    /// the session is live. The style bit is therefore written directly, which the integration test
+    /// <c>RdpPictureSurfaceTests</c> pins.
+    /// </remarks>
     /// <exception cref="ObjectDisposedException">The surface was already disposed.</exception>
     public void Show()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _control.Visible = true;
+        _carrier.Visible = true;
+
+        nint handle = _carrier.Handle;
+        nint style = Interop.GetWindowLongPtrW(handle, Interop.GwlpStyle);
+        nint visible = (nint)(long)Interop.WsVisible;
+        _ = Interop.SetWindowLongPtrW(handle, Interop.GwlpStyle, style | visible);
     }
 
     /// <summary>Destroys the hosted control. Idempotent.</summary>

@@ -34,8 +34,14 @@ public static class LeftoverChildSessionPolicy
     /// <summary>The service session, which must never be treated as one of ours.</summary>
     public const int ServiceSessionId = 0;
 
-    /// <summary>The station-name suffix every child session has.</summary>
+    /// <summary>The station-name suffix a child session has while its client is attached.</summary>
     private const string ChildStationSuffix = "#0";
+
+    /// <summary>
+    /// <c>WTS_CONNECTSTATE_CLASS.WTSDisconnected</c>: the session still holds a logon but has no client
+    /// attached, which is the shape a child session has after its window closed.
+    /// </summary>
+    public const int DisconnectedState = 4;
 
     /// <summary>
     /// Finds child sessions of this product, and only those: a session is a candidate when it is not
@@ -73,6 +79,14 @@ public static class LeftoverChildSessionPolicy
     /// session's is <c>Services</c>. The console session id always wins over the station name: leaving
     /// one stray session behind is far cheaper than signing the operator out.
     /// </summary>
+    /// <remarks>
+    /// A child session whose client is gone loses its station name: measured on the development machine
+    /// on 2026-10-26, a leftover child session reported an empty <c>WTSWinStationName</c> and the
+    /// disconnected state while its user name was still readable, and the sweep missed it because of the
+    /// name alone. Such a session is the very case this policy exists for, so a disconnected session
+    /// without a station name is one of ours as well. An active session without a station name is not:
+    /// that shape belongs to a session Windows has not finished creating.
+    /// </remarks>
     public static bool IsOneOfOurs(SessionCandidate session, int activeConsoleSessionId)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -82,7 +96,12 @@ public static class LeftoverChildSessionPolicy
             return false;
         }
 
-        return session.StationName.EndsWith(ChildStationSuffix, StringComparison.OrdinalIgnoreCase);
+        if (session.StationName.EndsWith(ChildStationSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return session.StationName.Length == 0 && session.State == DisconnectedState;
     }
 
     /// <summary>
@@ -195,6 +214,12 @@ public static class ChildSessionConnection
         client.DesktopWidth = desktopWidth;
         client.DesktopHeight = desktopHeight;
         client.AdvancedSettings2.EnableCredSspSupport = true;
+
+        // Without smart sizing the control draws the remote desktop at its native size and clips whatever
+        // does not fit, so a window that is resized any way but exactly the session size would show a
+        // cropped corner of the desktop instead of the whole picture. Smart sizing scales the picture to
+        // the control's own size, keeping the aspect ratio, which is what the picture rectangle expects.
+        client.AdvancedSettings2.SmartSizing = true;
 
         // A child-session connection is the only kind this product makes; a flag that did not stick
         // would take over the operator's own session instead.

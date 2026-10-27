@@ -46,10 +46,12 @@ public static class CloseConfirmationDialog
                 Size = Marshal.SizeOf<TaskDialogConfig>(),
                 ParentWindow = owner,
                 Flags = TaskDialogNative.TdfPositionRelativeToWindow
-                    | TaskDialogNative.TdfAllowDialogCancellation
-                    | TaskDialogNative.TdfUseMainIconHandle,
+                    | TaskDialogNative.TdfAllowDialogCancellation,
                 WindowTitle = config.Title,
-                MainIcon = TaskDialogNative.LoadIconW(0, (nint)TaskDialogNative.IdiWarning),
+
+                // The standard warning icon is passed as its resource identifier: the flag that switches
+                // the field to an icon handle is not set, which is what the system expects for TD_*_ICON.
+                MainIcon = TaskDialogNative.WarningIcon,
                 Content = config.Body,
                 ButtonCount = config.Buttons.Count,
                 Buttons = buttonArray,

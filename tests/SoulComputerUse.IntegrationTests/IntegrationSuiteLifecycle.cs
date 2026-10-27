@@ -6,6 +6,8 @@ using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using SoulComputerUse.Windows.Native;
+using SoulComputerUse.Windows.Rdp;
+using SoulComputerUse.Windows.SessionLifecycle.Teardown;
 using SoulComputerUse.Windows.SingleInstance;
 
 namespace SoulComputerUse.IntegrationTests;
@@ -100,6 +102,38 @@ public sealed class IntegrationSuiteLifecycle
         catch (InvalidOperationException error)
         {
             problems.Add($"the production lock state could not be read: {error.Message}");
+        }
+
+        // A logged-on child session answers the next connection without asking for a logon, which the
+        // contract forbids. The check lives here so the suite says so once, instead of failing later in
+        // cases that read the session table and cannot explain what they saw.
+        try
+        {
+            List<SessionCandidate> candidates = [];
+            foreach (WtsSessionEntry entry in new WtsSessionTable().Read())
+            {
+                candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+            }
+
+            IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(
+                candidates,
+                WtsSessionProbe.GetActiveConsoleSessionId());
+            if (leftovers.Count > 0)
+            {
+                List<string> ids = [];
+                foreach (SessionCandidate leftover in leftovers)
+                {
+                    ids.Add(leftover.Id.ToString(CultureInfo.InvariantCulture));
+                }
+
+                problems.Add(
+                    "child session id(s) " + string.Join(", ", ids)
+                    + " are still logged on; log them off first, or the next connection would skip the logon gate");
+            }
+        }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            problems.Add($"the session table could not be read: {error.Message}");
         }
 
         if (problems.Count > 0)

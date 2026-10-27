@@ -503,7 +503,7 @@ public sealed class SessionStartSplitTests
             TimeSpan.FromMilliseconds(100),
             TimeSpan.FromMilliseconds(500),
             clock,
-            () => true);
+            new ScriptedLogonEvidence(createdSessionId: 15, hasCreatedSession: true, [true]));
 
         waiter.Await();
 
@@ -514,10 +514,40 @@ public sealed class SessionStartSplitTests
     }
 
     [TestMethod]
+    public void AConnectedClientKeepsWaitingWhileItsOwnChildSessionShowsTheLogonScreen()
+    {
+        RecordingWaitClock clock = new();
+        Queue<int> remaining = new([2, 1, 1, 1, 1, 1]);
+        SessionConnectionWaiter waiter = new(
+            () => remaining.Dequeue(),
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromSeconds(10),
+            clock,
+            new ScriptedLogonEvidence(createdSessionId: 15, hasCreatedSession: true, [false, false, false, true]));
+
+        waiter.Await();
+
+        Assert.IsTrue(
+            waiter.SawLogonScreenInCreatedSession,
+            "A session of this run with no user name yet is sitting on its own Windows logon screen, which the client reports as connected.");
+        Assert.IsTrue(
+            waiter.SawLogonThroughSessionUser,
+            "The wait must end when Windows publishes the user of the session this run created.");
+        Assert.IsFalse(waiter.SawAwaitingCredentials, "This machine's client never reports the logon screen as state 3.");
+    }
+
+    [TestMethod]
     public void AConnectionThatSkippedTheLogonScreenIsRefusedAsAStateViolation()
     {
         RecordingWaitClock clock = new();
-        SessionConnectionWaiter waiter = CreateWaiter([2, 1], clock);
+        Queue<int> remaining = new([2, 1, 1]);
+        SessionConnectionWaiter waiter = new(
+            () => remaining.Dequeue(),
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(500),
+            clock,
+            new ScriptedLogonEvidence(createdSessionId: 0, hasCreatedSession: false, [false, false]),
+            TimeSpan.FromMilliseconds(100));
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => waiter.Await());
 
@@ -527,19 +557,35 @@ public sealed class SessionStartSplitTests
             "logon",
             "The refusal must name the logon step that was bypassed, because that is what the operator has to investigate.");
         Assert.IsFalse(waiter.SawAwaitingCredentials);
-        Assert.AreEqual(1, clock.Waits, "The refusal must happen as soon as the connected state appears without the logon step.");
+        Assert.AreEqual(
+            2,
+            clock.Waits,
+            "The grace period is one observation, so the refusal happens on the second connected observation.");
     }
 
     [TestMethod]
     public void AConnectionThatDroppedIsRefusedAsDisconnected()
     {
         RecordingWaitClock clock = new();
-        SessionConnectionWaiter waiter = CreateWaiter([0], clock);
+        SessionConnectionWaiter waiter = CreateWaiter([2, 0], clock);
 
         SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => waiter.Await());
 
         Assert.AreEqual(SessionErrorCode.Disconnected, error.Code, error.Message);
-        Assert.AreEqual(0, clock.Waits, "A disconnected session needs no further observation.");
+        Assert.AreEqual(1, clock.Waits, "The drop is only a drop after the client began connecting.");
+    }
+
+    [TestMethod]
+    public void AFirstIdleObservationIsNotReadAsADrop()
+    {
+        RecordingWaitClock clock = new();
+        SessionConnectionWaiter waiter = CreateWaiter([0, 2, 3, 1], clock);
+
+        waiter.Await();
+
+        Assert.IsTrue(
+            waiter.SawAwaitingCredentials,
+            "The client reports idle until its transport starts, so the first idle must not end the wait.");
     }
 
     [TestMethod]
@@ -1222,6 +1268,36 @@ public sealed class SessionStartSplitTests
         {
             Assert.IsGreaterThan(TimeSpan.Zero, duration, "The waiter must only ever ask for a positive interval.");
             _calls.Add("wait");
+        }
+    }
+
+    /// <summary>
+    /// The two facts the logon gate reads from the machine, answered from a script so one case can drive
+    /// them: whether a session of this run appeared, and whether Windows published a user for it.
+    /// </summary>
+    private sealed class ScriptedLogonEvidence : ILogonEvidence
+    {
+        private readonly bool _hasCreatedSession;
+        private readonly Queue<bool> _loggedOnAnswers;
+
+        internal ScriptedLogonEvidence(int createdSessionId, bool hasCreatedSession, IEnumerable<bool> loggedOnAnswers)
+        {
+            ArgumentNullException.ThrowIfNull(loggedOnAnswers);
+            CreatedSessionId = createdSessionId;
+            _hasCreatedSession = hasCreatedSession;
+            _loggedOnAnswers = new Queue<bool>(loggedOnAnswers);
+        }
+
+        public int CreatedSessionId { get; }
+
+        public bool HasCreatedSession()
+        {
+            return _hasCreatedSession;
+        }
+
+        public bool HasLoggedOnUser()
+        {
+            return _loggedOnAnswers.Count > 0 && _loggedOnAnswers.Dequeue();
         }
     }
 }

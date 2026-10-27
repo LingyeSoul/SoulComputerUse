@@ -74,6 +74,37 @@ public sealed class LeftoverChildSessionPolicyTests
     }
 
     [TestMethod]
+    public void ADisconnectedSessionWithoutAStationNameIsALeftoverToo()
+    {
+        // Measured on this machine on 2026-10-26: a child session whose client is gone reports an empty
+        // WinStationName and the disconnected state while its user name stays readable. Identifying only
+        // the #0 shape would miss it and let the next connection skip the operator's logon.
+        SessionCandidate leftover = new(2, string.Empty, LeftoverChildSessionPolicy.DisconnectedState);
+
+        Assert.IsTrue(
+            LeftoverChildSessionPolicy.IsOneOfOurs(leftover, ConsoleSessionId),
+            "A disconnected session without a station name is the leftover child session this gate exists for.");
+
+        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(
+            [new(0, "Services", 4), new(1, "Console", 0), leftover],
+            ConsoleSessionId);
+
+        Assert.HasCount(1, leftovers);
+        Assert.AreEqual(2, leftovers[0].Id);
+        Assert.AreEqual(LeftoverVerdict.LeftoverFound, LeftoverChildSessionPolicy.Decide(leftovers));
+    }
+
+    [TestMethod]
+    public void AnActiveSessionWithoutAStationNameIsNotALeftover()
+    {
+        SessionCandidate stillStarting = new(7, string.Empty, 0);
+
+        Assert.IsFalse(
+            LeftoverChildSessionPolicy.IsOneOfOurs(stillStarting, ConsoleSessionId),
+            "A session Windows is still creating has no station name yet either, and signing it off would be a guess.");
+    }
+
+    [TestMethod]
     public void TheRefusalNamesManualInterventionAndTheReason()
     {
         InvalidOperationException error = LeftoverChildSessionPolicy.ManualInterventionRequired("child session 15 could not be logged off.");

@@ -33,6 +33,18 @@ internal static class NativeMethods
     internal const uint WmSysCommand = 0x0112;
     internal const int ScMinimize = 0xF020;
     internal const int ScMaximize = 0xF030;
+
+    /// <summary><c>SC_MOVE</c>: starts the system's own window-move loop.</summary>
+    internal const int ScMove = 0xF010;
+
+    /// <summary><c>SC_SIZE</c>: starts the system's own window-resize loop.</summary>
+    internal const int ScSize = 0xF000;
+
+    /// <summary>
+    /// The wParam <c>VK_LBUTTON</c> value the move and size loops expect; the system asks for the button
+    /// that started the drag, not a virtual key of a keyboard.
+    /// </summary>
+    internal const int VkLButton = 0x02;
     internal const int ScRestore = 0xF120;
     internal const int ScClose = 0xF060;
 
@@ -41,6 +53,9 @@ internal static class NativeMethods
 
     internal const int GwlpStyle = -16;
     internal const long WsChild = 0x40000000;
+
+    /// <summary><c>WS_POPUP</c>: the style a Windows Forms <c>Form</c> is created with as a top-level window.</summary>
+    internal const long WsPopup = unchecked((long)0x80000000);
 
     internal const int HtClient = 1;
     internal const int HtCaption = 2;
@@ -72,6 +87,13 @@ internal static class NativeMethods
     internal const uint SwpNoSize = 0x0001;
     internal const uint SwpNoMove = 0x0002;
     internal const uint SwpFrameChanged = 0x0020;
+
+    /// <summary>
+    /// Suppresses <c>WM_WINDOWPOSCHANGING</c>, so a window procedure cannot veto the requested rectangle.
+    /// Windows Forms needs it: a managed child vetoes a raw <c>SetWindowPos</c> with the bounds its own
+    /// layout computed, which would put a reparented control back to its carrier's size.
+    /// </summary>
+    internal const uint SwpNoSendChanging = 0x0400;
 
     internal const int SmCxScreen = 0;
     internal const int SmCyScreen = 1;
@@ -128,6 +150,10 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool ScreenToClient(nint handle, ref NativePoint point);
+
+    /// <summary>Returns the window that owns one screen point, which is the window that receives the input.</summary>
+    [DllImport("user32.dll")]
+    internal static extern nint WindowFromPoint(NativePoint point);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

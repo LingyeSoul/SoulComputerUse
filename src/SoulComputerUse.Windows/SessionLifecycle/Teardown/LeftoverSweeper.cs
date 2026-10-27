@@ -37,14 +37,26 @@ public sealed class LeftoverSweeper
     /// </summary>
     public const string ReportDataKey = "SoulComputerUse.SessionLifecycle.Teardown.LeftoverSweepReport";
 
-    private readonly IWtsSessionTable _sessionTable;
+    /// <summary>How often the session table is read while a logoff request settles.</summary>
+    private static readonly TimeSpan ConfirmationInterval = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>Creates a sweep over one session table.</summary>
-    /// <exception cref="ArgumentNullException">The session table is null.</exception>
-    public LeftoverSweeper(IWtsSessionTable sessionTable)
+    /// <summary>
+    /// How long a logoff request may take to disappear from the session table. Windows finishes the logoff
+    /// asynchronously, and a session that is still listed a moment after the request is not a failure.
+    /// </summary>
+    private static readonly TimeSpan ConfirmationTimeout = TimeSpan.FromSeconds(15);
+
+    private readonly IWtsSessionTable _sessionTable;
+    private readonly ILogoffSettle _settle;
+
+    /// <summary>Creates a sweep over one session table and the wait its confirmations use.</summary>
+    /// <exception cref="ArgumentNullException">The session table or the settle is null.</exception>
+    public LeftoverSweeper(IWtsSessionTable sessionTable, ILogoffSettle settle)
     {
         ArgumentNullException.ThrowIfNull(sessionTable);
+        ArgumentNullException.ThrowIfNull(settle);
         _sessionTable = sessionTable;
+        _settle = settle;
     }
 
     /// <summary>
@@ -85,8 +97,17 @@ public sealed class LeftoverSweeper
         }
 
         // A request is not a result: every requested session has to be absent from a fresh read before
-        // a connection may present the logon screen.
+        // a connection may present the logon screen. The read is repeated while the logoff settles,
+        // because Windows removes the session asynchronously.
         List<int> freshSurvivors = FindSurvivors(loggedOff);
+        int attempts = 0;
+        while (freshSurvivors.Count > 0 && attempts * ConfirmationInterval < ConfirmationTimeout)
+        {
+            attempts++;
+            _settle.Wait(ConfirmationInterval);
+            freshSurvivors = FindSurvivors(loggedOff);
+        }
+
         if (freshSurvivors.Count > 0)
         {
             throw Refuse(

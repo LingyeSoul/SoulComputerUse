@@ -111,8 +111,9 @@ public sealed class SessionStartPhasesIntegrationTests
         CollectionAssert.AreEqual(new List<string> { "before-connect", "open" }, _harness.Calls);
         Assert.AreEqual(0, _harness.AfterLogon.Count, "A connection that did not open must never be followed by an agent attach.");
         CollectionAssert.AreEqual(
-            new List<SessionStartPhase> { SessionStartPhase.BeforeConnect },
-            _harness.Observer.Phases.ToList());
+            new List<SessionStartPhase> { SessionStartPhase.BeforeConnect, SessionStartPhase.AwaitingCredentials },
+            _harness.Observer.Phases.ToList(),
+            "The caption announces the logon-screen phase before the connection attempt, because the window is showing that screen for the whole call.");
         Assert.IsTrue(
             SingleInstanceLock.IsHeldByAnyone(_lockName),
             "The runner must not close a lock that a before-connect segment took; the caller still owns its cleanup.");

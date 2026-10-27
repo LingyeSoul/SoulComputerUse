@@ -98,7 +98,7 @@ public sealed class SessionTeardownTests
                 new WtsSessionEntry(1, "Console", 0),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
 
         Assert.IsEmpty(report.LoggedOffSessionIds, "Nothing of ours is left over, so nothing may be logged off.");
         Assert.IsEmpty(report.RemainingSessionIds);
@@ -118,7 +118,7 @@ public sealed class SessionTeardownTests
                 new WtsSessionEntry(ChildSessionId, "RDP-Tcp#0", 0),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
 
         CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(table.LogOffCalls));
         CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(report.LoggedOffSessionIds));
@@ -139,7 +139,7 @@ public sealed class SessionTeardownTests
                 new WtsSessionEntry(22, "RDP-Tcp#0", 0),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
 
         CollectionAssert.AreEqual(new List<int> { 15, 22 }, new List<int>(table.LogOffCalls));
         CollectionAssert.AreEqual(new List<int> { 15, 22 }, new List<int>(report.LoggedOffSessionIds));
@@ -163,7 +163,7 @@ public sealed class SessionTeardownTests
         };
 
         InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
-            () => new LeftoverSweeper(table).Sweep());
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep());
 
         StringAssert.StartsWith(
             error.Message,
@@ -193,7 +193,7 @@ public sealed class SessionTeardownTests
         };
 
         InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
-            () => new LeftoverSweeper(table).Sweep());
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep());
 
         StringAssert.StartsWith(error.Message, "manual_intervention_required:");
         Assert.AreEqual(1, table.ReadCount, "A refused request leaves nothing to verify, so the sweep must not claim a re-read happened.");
@@ -210,7 +210,7 @@ public sealed class SessionTeardownTests
                 new WtsSessionEntry(1, "RDP-Tcp#0", 0),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
 
         Assert.IsEmpty(table.LogOffCalls, "The console session id always wins over the station name; signing the operator out is unrecoverable.");
         Assert.IsEmpty(report.LoggedOffSessionIds);
@@ -480,6 +480,18 @@ public sealed class SessionTeardownTests
         public int ActiveConsoleSessionId()
         {
             return _consoleSessionId;
+        }
+    }
+
+    /// <summary>
+    /// The wait a logoff confirmation uses in a test: it returns at once, so the sweep's confirmation loop
+    /// runs without spending the production timeout.
+    /// </summary>
+    private sealed class ImmediateLogoffSettle : ILogoffSettle
+    {
+        public void Wait(TimeSpan interval)
+        {
+            Assert.IsGreaterThan(TimeSpan.Zero, interval, "The sweep must only ever ask for a positive interval.");
         }
     }
 
