@@ -36,4 +36,38 @@ public sealed class HostLaunchGuardTests
         Assert.ThrowsExactly<ArgumentException>(() => HostExecutablePath.Resolve(string.Empty));
         Assert.ThrowsExactly<ArgumentException>(() => HostExecutablePath.Resolve("   "));
     }
+
+    [TestMethod]
+    public void AProcessOutsideTheConsoleSessionIsRefused()
+    {
+        ConsoleSessionGuard guard = new(
+            readProcessSessionId: static () => 2,
+            readConsoleSessionId: static () => 1);
+
+        Assert.IsFalse(
+            guard.IsCurrentProcessOnConsoleSession(),
+            "A process in a remote desktop or disconnected session must never start a host window.");
+    }
+
+    [TestMethod]
+    public void AProcessOnTheConsoleSessionIsAccepted()
+    {
+        ConsoleSessionGuard guard = new(
+            readProcessSessionId: static () => 1,
+            readConsoleSessionId: static () => 1);
+
+        Assert.IsTrue(guard.IsCurrentProcessOnConsoleSession());
+    }
+
+    [TestMethod]
+    public void AnUnreadableConsoleSessionFailsClosed()
+    {
+        ConsoleSessionGuard guard = new(
+            readProcessSessionId: static () => 1,
+            readConsoleSessionId: static () => throw new InvalidOperationException("No session is attached to the console."));
+
+        Assert.IsFalse(
+            guard.IsCurrentProcessOnConsoleSession(),
+            "An unreadable console session is not one a launch may rely on, so the guard must refuse instead of throwing.");
+    }
 }

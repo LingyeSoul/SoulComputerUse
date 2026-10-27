@@ -32,7 +32,12 @@ public sealed class OwnerSessionResolver
     internal const string StartInProgressMessage =
         "The session owner is still starting and may be waiting for the operator to log on; retry after the operator finishes signing in.";
 
-    private const string LockHeldMessage =
+    /// <summary>
+    /// The explanation for a held lock whose owner does not answer on the pipe and whose record does not show
+    /// a live starting owner. Shared with host launching so both surfaces report the same condition with the
+    /// same fixed template.
+    /// </summary>
+    internal const string LockHeldMessage =
         "Another process holds the single-instance lock but does not answer on the owner pipe, so no session was started. "
         + "Use Task Manager's Details tab to look for a running SoulComputerUse process, or close the existing session and retry.";
 

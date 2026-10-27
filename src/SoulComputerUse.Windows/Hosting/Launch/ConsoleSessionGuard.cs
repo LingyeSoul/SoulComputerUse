@@ -20,14 +20,36 @@ namespace SoulComputerUse.Windows.Hosting.Launch;
 /// </remarks>
 public sealed class ConsoleSessionGuard : IConsoleSessionGuard
 {
+    private readonly Func<int> _readProcessSessionId;
+    private readonly Func<int> _readConsoleSessionId;
+
+    /// <summary>Creates the guard over the real Windows session table.</summary>
+    public ConsoleSessionGuard()
+        : this(WtsSessionProbe.GetCurrentProcessSessionId, WtsSessionProbe.GetActiveConsoleSessionId)
+    {
+    }
+
+    /// <summary>
+    /// Creates the guard over two injected session readers, so the fail-closed branch can be exercised on a
+    /// machine that does have a console session. Production code always uses the parameterless constructor.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">A reader is null.</exception>
+    internal ConsoleSessionGuard(Func<int> readProcessSessionId, Func<int> readConsoleSessionId)
+    {
+        ArgumentNullException.ThrowIfNull(readProcessSessionId);
+        ArgumentNullException.ThrowIfNull(readConsoleSessionId);
+        _readProcessSessionId = readProcessSessionId;
+        _readConsoleSessionId = readConsoleSessionId;
+    }
+
     /// <inheritdoc />
     public bool IsCurrentProcessOnConsoleSession()
     {
-        int processSessionId = WtsSessionProbe.GetCurrentProcessSessionId();
+        int processSessionId = _readProcessSessionId();
         int consoleSessionId;
         try
         {
-            consoleSessionId = WtsSessionProbe.GetActiveConsoleSessionId();
+            consoleSessionId = _readConsoleSessionId();
         }
         catch (InvalidOperationException)
         {
