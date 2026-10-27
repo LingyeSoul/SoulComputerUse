@@ -203,6 +203,32 @@ public sealed class McpServerTests
     }
 
     [TestMethod]
+    public async Task AStartSessionWithUnexpectedArgumentsIsAnInvalidRequest()
+    {
+        RecordingSessionAccessor accessor = new(new RecordingSessionClient());
+        FakeHostStarter starter = new(HostStartOutcome.Started);
+
+        ServerExchange exchange = await RunServerAsync(accessor, starter, [Call("62", "start_session", """{"foo":1}""")]);
+
+        using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
+        Assert.AreEqual(-32602, response.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+        Assert.AreEqual(0, starter.StartCount, "A refused call must not start the host.");
+        Assert.AreEqual(0, accessor.ResolveCount, "A refused call must not resolve a session.");
+    }
+
+    [TestMethod]
+    public async Task AStartSessionWithAnEmptyArgumentsObjectSucceeds()
+    {
+        RecordingSessionAccessor accessor = new(new RecordingSessionClient());
+        FakeHostStarter starter = new(HostStartOutcome.Started);
+
+        ServerExchange exchange = await RunServerAsync(accessor, starter, [Call("63", "start_session", "{}")]);
+
+        Assert.AreEqual("{\"ok\":true}", ContentText(ResultOf(exchange)));
+        Assert.AreEqual(1, starter.StartCount);
+    }
+
+    [TestMethod]
     [DataRow(SessionErrorCode.LockHeld, "E_LOCK_HELD", false)]
     [DataRow(SessionErrorCode.NotReady, "E_NOT_READY", true)]
     [DataRow(SessionErrorCode.HostLaunchFailed, "E_HOST_LAUNCH_FAILED", false)]

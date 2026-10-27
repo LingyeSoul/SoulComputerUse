@@ -186,6 +186,7 @@ public sealed class McpServer
                 JsonElement? arguments = ReadArguments(parameters);
                 if (selection.LocalTool is McpLocalTool localTool)
                 {
+                    RequireNoArguments(localTool, arguments);
                     return await _executor.ExecuteLocalAsync(localTool, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -330,6 +331,23 @@ public sealed class McpServer
         }
 
         return arguments;
+    }
+
+    /// <summary>
+    /// Refuses an argument supplied to an adapter-local tool. Every local tool publishes the empty
+    /// object schema, so a supplied name is a request the published schema does not accept; the
+    /// message names the tool and never a supplied value.
+    /// </summary>
+    private static void RequireNoArguments(McpLocalTool tool, JsonElement? arguments)
+    {
+        if (arguments is null || !arguments.Value.EnumerateObject().Any())
+        {
+            return;
+        }
+
+        throw new McpRequestException(
+            JsonRpcErrorCodes.InvalidParams,
+            $"The tool '{McpLocalToolTable.NameOf(tool)}' takes no arguments.");
     }
 
     private static bool TryReadId(JsonElement root, out bool hasId, out string idJson)
