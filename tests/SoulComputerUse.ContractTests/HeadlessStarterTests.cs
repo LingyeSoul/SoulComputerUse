@@ -159,6 +159,31 @@ public sealed class HeadlessStarterTests
     }
 
     [TestMethod]
+    public async Task AStartingOwnerSeenByTheProbeFailsWithNotReadyAndBuildsNoBackend()
+    {
+        RecordingSessionClient backend = new();
+        HeadlessOwnerStarter starter = new(
+            CreateOptions(() =>
+            {
+                backend.StartCount++;
+                return backend;
+            }),
+            new StubOwnerProbe(lockExists: true, ownerPipeReachable: false, liveOwnerStarting: true));
+
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => starter.StartAsync(CancellationToken.None).WaitAsync(CaseTimeout));
+
+        Assert.AreEqual(SessionErrorCode.NotReady, error.Code);
+        Assert.IsTrue(error.Retryable, "A session owner that is still starting must be retried, not treated as a held lock.");
+        StringAssert.Contains(error.Message, "starting");
+        AssertNoMachineData(error.Message);
+        Assert.AreEqual(0, backend.StartCount, "A starting owner must not lead to a second owner in this process.");
+        Assert.IsFalse(
+            File.Exists(_store.RecordPath),
+            "A starting owner must not produce a record, because this process never became the owner.");
+    }
+
+    [TestMethod]
     public async Task AHeldLockSeenByTheProbeFailsWithLockHeldAndBuildsNoBackend()
     {
         using SingleInstanceLock held = SingleInstanceLock.Acquire(_lockName);
@@ -171,7 +196,7 @@ public sealed class HeadlessStarterTests
                 backend.StartCount++;
                 return backend;
             }),
-            new OwnerProbe(_lockName, _pipeName));
+            new OwnerProbe(_lockName, _pipeName, _store));
 
         SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
             () => starter.StartAsync(CancellationToken.None).WaitAsync(CaseTimeout));
@@ -226,7 +251,7 @@ public sealed class HeadlessStarterTests
                     backend.StartCount++;
                     return backend;
                 }),
-            new StubOwnerProbe(lockExists: false, ownerPipeReachable: true));
+            new StubOwnerProbe(lockExists: false, ownerPipeReachable: true, liveOwnerStarting: false));
 
         ISessionClient client = await starter.StartAsync(CancellationToken.None).WaitAsync(CaseTimeout);
 
@@ -304,7 +329,7 @@ public sealed class HeadlessStarterTests
     {
         return new HeadlessOwnerStarter(
             CreateOptions(clientFactory),
-            new StubOwnerProbe(lockExists: false, ownerPipeReachable: false));
+            new StubOwnerProbe(lockExists: false, ownerPipeReachable: false, liveOwnerStarting: false));
     }
 
     private HeadlessStarterOptions CreateOptions(Func<ISessionClient> clientFactory)
@@ -329,17 +354,24 @@ public sealed class HeadlessStarterTests
         {
             return Task.FromResult(false);
         }
+
+        public bool IsLiveOwnerStarting()
+        {
+            return false;
+        }
     }
 
     private sealed class StubOwnerProbe : IOwnerProbe
     {
         private readonly bool _lockExists;
         private readonly bool _ownerPipeReachable;
+        private readonly bool _liveOwnerStarting;
 
-        internal StubOwnerProbe(bool lockExists, bool ownerPipeReachable)
+        internal StubOwnerProbe(bool lockExists, bool ownerPipeReachable, bool liveOwnerStarting)
         {
             _lockExists = lockExists;
             _ownerPipeReachable = ownerPipeReachable;
+            _liveOwnerStarting = liveOwnerStarting;
         }
 
         public bool LockExists()
@@ -350,6 +382,11 @@ public sealed class HeadlessStarterTests
         public Task<bool> IsOwnerPipeReachableAsync(CancellationToken cancellationToken)
         {
             return Task.FromResult(_ownerPipeReachable);
+        }
+
+        public bool IsLiveOwnerStarting()
+        {
+            return _liveOwnerStarting;
         }
     }
 

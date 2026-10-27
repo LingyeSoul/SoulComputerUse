@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.SingleInstance;
 
@@ -59,8 +58,8 @@ public sealed class OwnerRecordStoreAdapter : IOwnerRecordStore
 
         RecoveryEvidence evidence = new(
             RecordExists: true,
-            OwnerProcessAlive: IsOwnerProcessAlive(record.HostPid),
-            OwnerProcessStartTimeMatches: DoesOwnerStartTimeMatch(record.HostPid, record.HostProcessStartTime),
+            OwnerProcessAlive: OwnerProcessLiveness.IsAlive(record.HostPid),
+            OwnerProcessStartTimeMatches: OwnerProcessLiveness.DoesStartTimeMatch(record.HostPid, record.HostProcessStartTime),
             RecordedState: record.State,
             AcquiredAt: record.AcquiredAt,
             Now: DateTimeOffset.UtcNow);
@@ -80,51 +79,5 @@ public sealed class OwnerRecordStoreAdapter : IOwnerRecordStore
     public void Delete()
     {
         _store.Delete();
-    }
-
-    /// <summary>Reports whether the recorded owner process id is still in use by any process.</summary>
-    private static bool IsOwnerProcessAlive(int hostPid)
-    {
-        if (hostPid <= 0)
-        {
-            return false;
-        }
-
-        try
-        {
-            using Process process = Process.GetProcessById(hostPid);
-            return !process.HasExited;
-        }
-        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Reports whether the recorded start time still belongs to that process id, which is the contract's
-    /// PID-reuse criterion. A different start time means the id now names another process.
-    /// </summary>
-    private static bool DoesOwnerStartTimeMatch(int hostPid, DateTimeOffset hostProcessStartTime)
-    {
-        if (hostPid <= 0 || hostProcessStartTime == default)
-        {
-            return false;
-        }
-
-        try
-        {
-            using Process process = Process.GetProcessById(hostPid);
-            DateTimeOffset actual = new(process.StartTime.ToUniversalTime());
-
-            // The record round-trips a timestamp while the process API reports local time to the
-            // millisecond, so a small window is used instead of demanding exact equality.
-            TimeSpan difference = actual - hostProcessStartTime;
-            return difference.Duration() < TimeSpan.FromSeconds(1);
-        }
-        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
-        {
-            return false;
-        }
     }
 }

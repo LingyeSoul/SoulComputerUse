@@ -17,11 +17,13 @@ namespace SoulComputerUse.Windows.Hosting.Headless;
 /// <remarks>
 /// <para>
 /// Start order: probe the lock and the pipe without creating either, refuse a held lock with
-/// <c>E_LOCK_HELD</c>, attach when the pipe already answers, and only then become the owner. Becoming
-/// the owner means <see cref="SessionOwnerService.Start"/>, which takes the lock, writes the ownership
-/// record and serves the owner pipe in that order. The handler behind the pipe is built from the client
-/// the starter created, and the caller receives a <see cref="NamedPipeSessionClient"/> instead of that
-/// inner client, so a caller cannot tell this path from attaching to an existing owner.
+/// <c>E_LOCK_HELD</c>, attach when the pipe already answers, and only then become the owner. A held lock
+/// whose ownership record names a live owner that is still starting is the one exception: it is the
+/// retryable <c>E_NOT_READY</c>, because that owner is in its logon window rather than abandoned.
+/// Becoming the owner means <see cref="SessionOwnerService.Start"/>, which takes the lock, writes the
+/// ownership record and serves the owner pipe in that order. The handler behind the pipe is built from
+/// the client the starter created, and the caller receives a <see cref="NamedPipeSessionClient"/>
+/// instead of that inner client, so a caller cannot tell this path from attaching to an existing owner.
 /// </para>
 /// <para>
 /// This implementation does not establish a remote desktop session. It hosts the owner pipe and one
@@ -70,8 +72,8 @@ public sealed class HeadlessOwnerStarter : IOwnerSessionStarter
     /// started it.
     /// </returns>
     /// <exception cref="SessionOperationException">
-    /// The lock is held without an answer (<c>E_LOCK_HELD</c>), or the backend cannot serve calls
-    /// (<c>E_NOT_READY</c>).
+    /// A live owner is still starting (<c>E_NOT_READY</c>), the lock is held without an answer
+    /// (<c>E_LOCK_HELD</c>), or the backend cannot serve calls (<c>E_NOT_READY</c>).
     /// </exception>
     /// <exception cref="InvalidOperationException">
     /// The pipe could not be started, or the lock and pipe state could not be observed.
@@ -82,8 +84,8 @@ public sealed class HeadlessOwnerStarter : IOwnerSessionStarter
 
         bool lockExists = _probe.LockExists();
         bool pipeReachable = await _probe.IsOwnerPipeReachableAsync(cancellationToken).ConfigureAwait(false);
-
-        OwnerDiscoveryDecision decision = OwnerDiscovery.Decide(lockExists, pipeReachable);
+        bool liveOwnerStarting = lockExists && !pipeReachable && _probe.IsLiveOwnerStarting();
+        OwnerDiscoveryDecision decision = OwnerDiscovery.Decide(lockExists, pipeReachable, liveOwnerStarting);
         switch (decision)
         {
             case OwnerDiscoveryDecision.UseExistingOwner:
@@ -91,6 +93,9 @@ public sealed class HeadlessOwnerStarter : IOwnerSessionStarter
                 // The pipe is authoritative: attach to it instead of starting a second session. The
                 // returned client owns nothing beyond its connection.
                 return new NamedPipeSessionClient(_options.PipeName);
+
+            case OwnerDiscoveryDecision.RefuseStartInProgress:
+                throw StartInProgressFailure();
 
             case OwnerDiscoveryDecision.RefuseLockHeld:
                 throw LockHeldFailure();
@@ -215,6 +220,14 @@ public sealed class HeadlessOwnerStarter : IOwnerSessionStarter
             SessionErrorCode.LockHeld,
             LockHeldMessage,
             SessionErrorCatalog.IsRetryable(SessionErrorCode.LockHeld));
+    }
+
+    private static SessionOperationException StartInProgressFailure()
+    {
+        return new SessionOperationException(
+            SessionErrorCode.NotReady,
+            OwnerSessionResolver.StartInProgressMessage,
+            SessionErrorCatalog.IsRetryable(SessionErrorCode.NotReady));
     }
 
     private static SessionOperationException NotReadyFailure()

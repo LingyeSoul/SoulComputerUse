@@ -13,4 +13,11 @@ public enum OwnerDiscoveryDecision
 
     /// <summary>The lock object exists but no owner answered, so the caller must fail with <c>E_LOCK_HELD</c>.</summary>
     RefuseLockHeld = 2,
+
+    /// <summary>
+    /// The lock object exists and this account's record names a live owner that is still starting or
+    /// connecting, so the caller must fail with the retryable <c>E_NOT_READY</c> instead of treating the
+    /// lock as held by a stale process.
+    /// </summary>
+    RefuseStartInProgress = 3,
 }
