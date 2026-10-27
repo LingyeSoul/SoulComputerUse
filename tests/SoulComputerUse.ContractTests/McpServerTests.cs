@@ -10,6 +10,8 @@ using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Mcp;
+using SoulComputerUse.Windows.Hosting.Discovery;
+using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.ContractTests;
 
@@ -45,7 +47,8 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new();
         ServerExchange exchange = await RunServerAsync(
-            client,
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Request("1", "initialize", """{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}""")]);
 
         Assert.HasCount(1, exchange.Responses);
@@ -65,7 +68,8 @@ public sealed class McpServerTests
     public async Task InitializeFallsBackToTheBaselineVersionForAnUnknownRevision()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Request("7", "initialize", """{"protocolVersion":"1999-01-01"}""")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
@@ -76,7 +80,8 @@ public sealed class McpServerTests
     public async Task InitializeWithoutParametersFallsBackToTheBaselineVersion()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             ["""{"jsonrpc":"2.0","id":1,"method":"initialize"}"""]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
@@ -87,7 +92,8 @@ public sealed class McpServerTests
     public async Task TheInitializedNotificationProducesNoResponse()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [
                 """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
                 Request("5", "ping", "{}"),
@@ -101,7 +107,10 @@ public sealed class McpServerTests
     [TestMethod]
     public async Task PingReturnsAnEmptyResultObject()
     {
-        ServerExchange exchange = await RunServerAsync(new RecordingSessionClient(), [Request("2", "ping", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Request("2", "ping", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         JsonElement result = response.RootElement.GetProperty("result");
@@ -112,14 +121,17 @@ public sealed class McpServerTests
     [TestMethod]
     public async Task ToolsListPublishesTheSevenContractToolsVerbatim()
     {
-        ServerExchange exchange = await RunServerAsync(new RecordingSessionClient(), [Request("3", "tools/list", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Request("3", "tools/list", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         JsonElement tools = response.RootElement.GetProperty("result").GetProperty("tools");
-        Assert.HasCount(7, tools.EnumerateArray(), "The contract defines exactly seven tools.");
+        Assert.HasCount(8, tools.EnumerateArray(), "The seven contract tools and the adapter's local start_session tool.");
 
         int index = 0;
-        foreach (JsonElement tool in tools.EnumerateArray())
+        foreach (JsonElement tool in tools.EnumerateArray().Take(7))
         {
             SessionTool expected = SessionToolCatalog.Tools[index];
             Assert.AreEqual(SessionToolNames.ToWireName(expected), tool.GetProperty("name").GetString());
@@ -131,13 +143,147 @@ public sealed class McpServerTests
                 $"{expected} must publish the catalog's schema unchanged.");
             index++;
         }
+
+        Assert.AreEqual(
+            "start_session",
+            tools.EnumerateArray().Last().GetProperty("name").GetString(),
+            "The local tool is appended after the seven contract tools.");
+    }
+
+    [TestMethod]
+    public async Task ToolsListIncludesTheLocalStartSessionTool()
+    {
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Request("4", "tools/list", "{}")]);
+
+        using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
+        JsonElement tools = response.RootElement.GetProperty("result").GetProperty("tools");
+        Assert.HasCount(1, tools.EnumerateArray().Where(tool => tool.GetProperty("name").GetString() == "get_status"));
+
+        JsonElement startSession = tools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "start_session");
+        Assert.AreEqual(
+            "Open the product window on a new session; the operator logs on themselves",
+            startSession.GetProperty("description").GetString());
+
+        using JsonDocument expectedSchema = JsonDocument.Parse(
+            """{"type":"object","properties":{},"additionalProperties":false,"required":[]}""");
+        Assert.IsTrue(
+            JsonElement.DeepEquals(expectedSchema.RootElement, startSession.GetProperty("inputSchema")),
+            "start_session takes no arguments and publishes the empty object schema.");
+    }
+
+    [TestMethod]
+    public async Task StartSessionLaunchesTheHostWithoutReadingStatus()
+    {
+        RecordingSessionAccessor accessor = new(new RecordingSessionClient());
+        FakeHostStarter starter = new(HostStartOutcome.Started);
+
+        ServerExchange exchange = await RunServerAsync(accessor, starter, [Call("6", "start_session", "{}")]);
+
+        Assert.AreEqual("{\"ok\":true}", ContentText(ResultOf(exchange)));
+        Assert.AreEqual(0, accessor.ResolveCount, "start_session must not resolve a session.");
+        Assert.AreEqual(1, starter.StartCount);
+    }
+
+    [TestMethod]
+    public async Task StartSessionReportsOkWhenTheOwnerWasAlreadyRunning()
+    {
+        FakeHostStarter starter = new(HostStartOutcome.AlreadyRunning);
+
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            starter,
+            [Call("61", "start_session", "{}")]);
+
+        Assert.AreEqual("{\"ok\":true}", ContentText(ResultOf(exchange)));
+        Assert.AreEqual(1, starter.StartCount);
+    }
+
+    [TestMethod]
+    [DataRow(SessionErrorCode.LockHeld, "E_LOCK_HELD", false)]
+    [DataRow(SessionErrorCode.NotReady, "E_NOT_READY", true)]
+    [DataRow(SessionErrorCode.HostLaunchFailed, "E_HOST_LAUNCH_FAILED", false)]
+    public async Task AStartSessionRefusalIsAToolErrorWithTheLaunchersCode(
+        SessionErrorCode code,
+        string wireName,
+        bool retryable)
+    {
+        SessionOperationException refusal = new(code, "A fixed template for the refusal.", retryable);
+        FakeHostStarter starter = new(HostStartOutcome.Started, refusal);
+
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            starter,
+            [Call("7", "start_session", "{}")]);
+
+        JsonElement result = ResultOf(exchange);
+        Assert.IsTrue(result.GetProperty("isError").GetBoolean());
+
+        using JsonDocument error = JsonDocument.Parse(ContentText(result));
+        Assert.AreEqual(wireName, error.RootElement.GetProperty("code").GetString());
+        Assert.AreEqual(retryable, error.RootElement.GetProperty("retryable").GetBoolean());
+    }
+
+    [TestMethod]
+    public async Task ASessionToolWithoutAnOwnerIsAToolErrorAndTheServerStaysAlive()
+    {
+        RecordingSessionAccessor accessor = new(
+            new RecordingSessionClient(),
+            new SessionOperationException(
+                SessionErrorCode.NotReady,
+                "No session owner is running.",
+                true));
+
+        ServerExchange exchange = await RunServerAsync(
+            accessor,
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("8", "get_status", "{}"), Request("9", "ping", "{}")]);
+
+        Assert.HasCount(2, exchange.Responses, "The server must keep serving after a failed tool call.");
+
+        using JsonDocument failure = JsonDocument.Parse(exchange.Responses[0]);
+        JsonElement result = failure.RootElement.GetProperty("result");
+        Assert.IsTrue(result.GetProperty("isError").GetBoolean());
+        using JsonDocument error = JsonDocument.Parse(ContentText(result));
+        Assert.AreEqual("E_NOT_READY", error.RootElement.GetProperty("code").GetString());
+
+        using JsonDocument ping = JsonDocument.Parse(exchange.Responses[1]);
+        Assert.AreEqual(9, ping.RootElement.GetProperty("id").GetInt32());
+        Assert.IsEmpty(ping.RootElement.GetProperty("result").EnumerateObject());
+    }
+
+    [TestMethod]
+    public async Task EachSessionToolCallResolvesAndReleasesItsOwnSession()
+    {
+        RecordingSessionAccessor accessor = new(new RecordingSessionClient());
+
+        ServerExchange exchange = await RunServerAsync(
+            accessor,
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("80", "get_status", "{}"), Call("81", "get_status", "{}")]);
+
+        Assert.HasCount(2, exchange.Responses);
+        Assert.AreEqual(2, accessor.ResolveCount, "Each tool call resolves its own session.");
+        Assert.AreEqual(2, accessor.ReleaseCount, "Each resolved session is released when its call ends.");
+    }
+
+    [TestMethod]
+    public void StartSessionIsNotAcceptedByTheSharedToolNameParser()
+    {
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => SessionToolNames.FromWireName("start_session"));
     }
 
     [TestMethod]
     public async Task GetStatusReturnsTheContractPayload()
     {
         RecordingSessionClient client = new();
-        ServerExchange exchange = await RunServerAsync(client, [Call("10", "get_status", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("10", "get_status", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         JsonElement result = response.RootElement.GetProperty("result");
@@ -163,7 +309,10 @@ public sealed class McpServerTests
             Status = ReadyStatus with { HelloHint = "helloNotEnrolled" },
         };
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("11", "get_status", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("11", "get_status", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         using JsonDocument status = JsonDocument.Parse(ContentText(response.RootElement.GetProperty("result")));
@@ -176,7 +325,10 @@ public sealed class McpServerTests
         byte[] frame = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03];
         RecordingSessionClient client = new() { Screenshot = frame };
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("12", "screenshot", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("12", "screenshot", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         JsonElement content = response.RootElement.GetProperty("result").GetProperty("content")[0];
@@ -194,7 +346,10 @@ public sealed class McpServerTests
     public async Task MouseMoveForwardsTheCoordinate()
     {
         RecordingSessionClient client = new();
-        ServerExchange exchange = await RunServerAsync(client, [Call("20", "mouse_move", """{"x":10,"y":20}""")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("20", "mouse_move", """{"x":10,"y":20}""")]);
 
         Assert.AreEqual((10, 20), client.LastMove);
         Assert.AreEqual("{\"ok\":true}", ContentText(ResultOf(exchange)));
@@ -206,7 +361,8 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new();
         ServerExchange exchange = await RunServerAsync(
-            client,
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("21", "mouse_click", """{"x":100,"y":200,"button":"right","count":2}""")]);
 
         Assert.AreEqual((100, 200, MouseButton.Right, 2), client.LastClick);
@@ -218,7 +374,8 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new();
         ServerExchange exchange = await RunServerAsync(
-            client,
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("22", "mouse_scroll", """{"x":5,"y":6,"deltaX":0,"deltaY":-120}""")]);
 
         Assert.AreEqual((5, 6, 0, -120), client.LastScroll);
@@ -231,7 +388,10 @@ public sealed class McpServerTests
         const string Secret = "s3cr3t-typed-text";
         RecordingSessionClient client = new();
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("30", "key_type", $$"""{"text":"{{Secret}}"}""")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("30", "key_type", $$"""{"text":"{{Secret}}"}""")]);
 
         Assert.AreEqual(Secret, client.LastTypedText);
         Assert.AreEqual("{\"ok\":true}", ContentText(ResultOf(exchange)));
@@ -244,7 +404,8 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new();
         ServerExchange exchange = await RunServerAsync(
-            client,
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("31", "key_press", """{"keys":["ctrl","alt","delete"]}""")]);
 
         CollectionAssert.AreEqual(
@@ -257,7 +418,10 @@ public sealed class McpServerTests
     public async Task ACoordinateOutsideTheReportedScreenIsAToolError()
     {
         RecordingSessionClient client = new();
-        ServerExchange exchange = await RunServerAsync(client, [Call("40", "mouse_move", """{"x":1920,"y":10}""")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("40", "mouse_move", """{"x":1920,"y":10}""")]);
 
         JsonElement result = ResultOf(exchange);
         Assert.IsTrue(result.GetProperty("isError").GetBoolean());
@@ -274,7 +438,8 @@ public sealed class McpServerTests
     public async Task ANegativeCoordinateIsAToolError()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("41", "mouse_click", """{"x":-1,"y":5,"button":"left","count":1}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -284,7 +449,10 @@ public sealed class McpServerTests
     [TestMethod]
     public async Task AnUnknownToolIsRejectedWithInvalidParams()
     {
-        ServerExchange exchange = await RunServerAsync(new RecordingSessionClient(), [Call("50", "shell", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("50", "shell", "{}")]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         Assert.AreEqual(-32602, response.RootElement.GetProperty("error").GetProperty("code").GetInt32());
@@ -294,7 +462,8 @@ public sealed class McpServerTests
     public async Task AnUnknownArgumentIsRefusedAsInvalidInput()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("51", "mouse_move", """{"x":1,"y":2,"zoom":3}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -305,7 +474,10 @@ public sealed class McpServerTests
     [TestMethod]
     public async Task AMissingRequiredArgumentIsRefusedAsInvalidInput()
     {
-        ServerExchange exchange = await RunServerAsync(new RecordingSessionClient(), [Call("52", "mouse_move", """{"x":1}""")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("52", "mouse_move", """{"x":1}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
         Assert.AreEqual("E_INPUT_INVALID", error.RootElement.GetProperty("code").GetString());
@@ -316,7 +488,8 @@ public sealed class McpServerTests
     public async Task AClickCountOutsideTheContractRangeIsRefused()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("53", "mouse_click", """{"x":1,"y":2,"button":"middle","count":4}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -329,7 +502,8 @@ public sealed class McpServerTests
         string text = new('a', 1001);
 
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("54", "key_type", $$"""{"text":"{{text}}"}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -342,7 +516,8 @@ public sealed class McpServerTests
     public async Task AKeyCombinationAboveTheLimitIsRefused()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("55", "key_press", """{"keys":["enter","esc","tab","delete","backspace","home"]}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -355,7 +530,8 @@ public sealed class McpServerTests
         const string NotAKey = "password-secret";
 
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             [Call("56", "key_press", $$"""{"keys":["enter","{{NotAKey}}"]}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
@@ -375,7 +551,10 @@ public sealed class McpServerTests
                 false),
         };
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("57", "mouse_move", """{"x":5000,"y":10}""")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("57", "mouse_move", """{"x":5000,"y":10}""")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
         Assert.AreEqual("E_AWAITING_CREDENTIALS", error.RootElement.GetProperty("code").GetString());
@@ -393,7 +572,10 @@ public sealed class McpServerTests
                 false),
         };
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("58", "screenshot", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("58", "screenshot", "{}")]);
 
         JsonElement result = ResultOf(exchange);
         Assert.IsTrue(result.GetProperty("isError").GetBoolean());
@@ -408,7 +590,10 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new() { Screenshot = new byte[ScreenshotLimit + 1] };
 
-        ServerExchange exchange = await RunServerAsync(client, [Call("59", "screenshot", "{}")]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
+            [Call("59", "screenshot", "{}")]);
 
         using JsonDocument error = JsonDocument.Parse(ContentText(ResultOf(exchange)));
         Assert.AreEqual("E_SCREENSHOT_TOO_LARGE", error.RootElement.GetProperty("code").GetString());
@@ -417,7 +602,10 @@ public sealed class McpServerTests
     [TestMethod]
     public async Task MalformedJsonIsAParseErrorWithANullId()
     {
-        ServerExchange exchange = await RunServerAsync(new RecordingSessionClient(), ["{not json"]);
+        ServerExchange exchange = await RunServerAsync(
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
+            ["{not json"]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
         Assert.AreEqual(-32700, response.RootElement.GetProperty("error").GetProperty("code").GetInt32());
@@ -428,7 +616,8 @@ public sealed class McpServerTests
     public async Task AnUnknownMethodIsMethodNotFound()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             ["""{"jsonrpc":"2.0","id":9,"method":"resources/list"}"""]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
@@ -440,7 +629,8 @@ public sealed class McpServerTests
     public async Task ToolsCallWithoutAnArgumentsObjectIsInvalidParams()
     {
         ServerExchange exchange = await RunServerAsync(
-            new RecordingSessionClient(),
+            new RecordingSessionAccessor(new RecordingSessionClient()),
+            new FakeHostStarter(HostStartOutcome.Started),
             ["""{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"mouse_move","arguments":[]}}"""]);
 
         using JsonDocument response = JsonDocument.Parse(exchange.Responses[0]);
@@ -452,7 +642,8 @@ public sealed class McpServerTests
     {
         RecordingSessionClient client = new();
         ServerExchange exchange = await RunServerAsync(
-            client,
+            new RecordingSessionAccessor(client),
+            new FakeHostStarter(HostStartOutcome.Started),
             [
                 Request("70", "initialize", """{"protocolVersion":"2024-11-05"}"""),
                 """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
@@ -491,7 +682,10 @@ public sealed class McpServerTests
         return $$"""{"jsonrpc":"2.0","id":{{id}},"method":"tools/call","params":{"name":"{{toolName}}","arguments":""" + argumentsJson + "}}";
     }
 
-    private static async Task<ServerExchange> RunServerAsync(ISessionClient client, IReadOnlyList<string> requestLines)
+    private static async Task<ServerExchange> RunServerAsync(
+        ISessionAccessor sessions,
+        IHostStarter hostStarter,
+        IReadOnlyList<string> requestLines)
     {
         UTF8Encoding encoding = new(encoderShouldEmitUTF8Identifier: false);
         byte[] requestBytes = encoding.GetBytes(string.Join('\n', requestLines) + '\n');
@@ -507,7 +701,7 @@ public sealed class McpServerTests
             using (StreamReader reader = new(input, encoding, detectEncodingFromByteOrderMarks: false))
             using (StreamWriter writer = new(output, encoding))
             {
-                McpServer server = new(client, reader, writer, diagnostics);
+                McpServer server = new(sessions, hostStarter, reader, writer, diagnostics);
                 await server.RunAsync(CancellationToken.None);
                 await writer.FlushAsync();
             }
@@ -609,6 +803,76 @@ public sealed class McpServerTests
         {
             SessionOperationException? failure = ActionFailure;
             return failure is null ? Task.CompletedTask : Task.FromException(failure);
+        }
+    }
+
+    /// <summary>
+    /// An <see cref="ISessionAccessor"/> that records how often a session was resolved and either
+    /// hands out one resolved session per call or fails with an armed error.
+    /// </summary>
+    private sealed class RecordingSessionAccessor : ISessionAccessor
+    {
+        private readonly RecordingSessionClient _client;
+        private readonly SessionOperationException? _failure;
+
+        internal RecordingSessionAccessor(RecordingSessionClient client)
+            : this(client, null)
+        {
+        }
+
+        internal RecordingSessionAccessor(RecordingSessionClient client, SessionOperationException? failure)
+        {
+            _client = client;
+            _failure = failure;
+        }
+
+        internal int ResolveCount { get; private set; }
+
+        internal int ReleaseCount { get; private set; }
+
+        public Task<ResolvedSession> ResolveAsync(CancellationToken cancellationToken)
+        {
+            ResolveCount++;
+            SessionOperationException? failure = _failure;
+            return failure is null
+                ? Task.FromResult(new ResolvedSession(_client, () =>
+                {
+                    ReleaseCount++;
+                    return ValueTask.CompletedTask;
+                }))
+                : Task.FromException<ResolvedSession>(failure);
+        }
+    }
+
+    /// <summary>
+    /// An <see cref="IHostStarter"/> that records how often a start was requested and returns an
+    /// outcome, or fails with an armed error.
+    /// </summary>
+    private sealed class FakeHostStarter : IHostStarter
+    {
+        private readonly HostStartOutcome _outcome;
+        private readonly SessionOperationException? _failure;
+
+        internal FakeHostStarter(HostStartOutcome outcome)
+            : this(outcome, null)
+        {
+        }
+
+        internal FakeHostStarter(HostStartOutcome outcome, SessionOperationException? failure)
+        {
+            _outcome = outcome;
+            _failure = failure;
+        }
+
+        internal int StartCount { get; private set; }
+
+        public Task<HostStartOutcome> StartAsync(CancellationToken cancellationToken)
+        {
+            StartCount++;
+            SessionOperationException? failure = _failure;
+            return failure is null
+                ? Task.FromResult(_outcome)
+                : Task.FromException<HostStartOutcome>(failure);
         }
     }
 }

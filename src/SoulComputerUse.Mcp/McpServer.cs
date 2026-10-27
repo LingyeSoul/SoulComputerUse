@@ -6,13 +6,15 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
+using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.Mcp;
 
 /// <summary>
 /// The MCP stdio adapter of the interface contract's section 5. It reads newline-delimited JSON-RPC
-/// 2.0 messages, publishes the session tool surface from <see cref="SessionToolCatalog"/>, and maps
-/// every tool onto the one shared <see cref="ISessionClient"/>.
+/// 2.0 messages, publishes the session tool surface from <see cref="SessionToolCatalog"/> plus the
+/// adapter-local <see cref="McpLocalToolTable"/>, and maps every session tool onto a session resolved
+/// for that one call.
 /// </summary>
 /// <remarks>
 /// A tool that fails is a tool result with <c>isError</c> and the contract's error object as text;
@@ -36,15 +38,21 @@ public sealed class McpServer
     private readonly TextWriter _output;
     private readonly TextWriter _diagnostics;
 
-    /// <summary>Creates one server over the given transport and client.</summary>
-    public McpServer(ISessionClient client, TextReader input, TextWriter output, TextWriter diagnostics)
+    /// <summary>Creates one server over the given transport, session accessor and host starter.</summary>
+    public McpServer(
+        ISessionAccessor sessions,
+        IHostStarter hostStarter,
+        TextReader input,
+        TextWriter output,
+        TextWriter diagnostics)
     {
-        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(sessions);
+        ArgumentNullException.ThrowIfNull(hostStarter);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(diagnostics);
 
-        _executor = new McpToolExecutor(client, diagnostics);
+        _executor = new McpToolExecutor(sessions, hostStarter, diagnostics);
         _input = input;
         _output = output;
         _diagnostics = diagnostics;
@@ -173,7 +181,22 @@ public sealed class McpServer
                 return ToolsList();
 
             case "tools/call":
-                return await _executor.ExecuteAsync(ReadTool(parameters), ReadArguments(parameters), cancellationToken).ConfigureAwait(false);
+            {
+                McpToolSelection selection = ReadTool(parameters);
+                JsonElement? arguments = ReadArguments(parameters);
+                if (selection.LocalTool is McpLocalTool localTool)
+                {
+                    return await _executor.ExecuteLocalAsync(localTool, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (selection.SessionTool is SessionTool sessionTool)
+                {
+                    return await _executor.ExecuteAsync(sessionTool, arguments, cancellationToken).ConfigureAwait(false);
+                }
+
+                throw new InvalidOperationException(
+                    "The tool selection named neither a session tool nor a local tool.");
+            }
 
             default:
                 throw new McpRequestException(
@@ -243,12 +266,22 @@ public sealed class McpServer
                 writer.WriteEndObject();
             }
 
+            foreach (McpLocalTool tool in McpLocalToolTable.Tools)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name", McpLocalToolTable.NameOf(tool));
+                writer.WriteString("description", McpLocalToolTable.Describe(tool));
+                writer.WritePropertyName("inputSchema");
+                writer.WriteRawValue(McpLocalToolTable.SchemaOf(tool));
+                writer.WriteEndObject();
+            }
+
             writer.WriteEndArray();
             writer.WriteEndObject();
         });
     }
 
-    private static SessionTool ReadTool(JsonElement? parameters)
+    private static McpToolSelection ReadTool(JsonElement? parameters)
     {
         if (parameters is null || parameters.Value.ValueKind != JsonValueKind.Object)
         {
@@ -265,9 +298,14 @@ public sealed class McpServer
         }
 
         string toolName = nameElement.GetString() ?? string.Empty;
+        if (McpLocalToolTable.TryFind(toolName, out McpLocalTool localTool))
+        {
+            return new McpToolSelection(null, localTool);
+        }
+
         try
         {
-            return SessionToolNames.FromWireName(toolName);
+            return new McpToolSelection(SessionToolNames.FromWireName(toolName), null);
         }
         catch (ArgumentOutOfRangeException)
         {

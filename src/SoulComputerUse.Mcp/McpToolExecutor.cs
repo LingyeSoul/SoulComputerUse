@@ -7,34 +7,48 @@ using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Hosting.Discovery;
+using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.Mcp;
 
 /// <summary>
-/// Maps one MCP tool call onto the shared session client and renders the contract's section 5
+/// Maps one MCP tool call onto a session resolved for that call and renders the contract's section 5
 /// result envelope. Coordinates are checked against a status read taken at the start of the same
 /// call: the adapter keeps no screen cache, because a stale size would accept a coordinate the
 /// session no longer has. A failed call is a tool result with <c>isError</c>, never a JSON-RPC error.
 /// </summary>
+/// <remarks>
+/// The session is resolved per call and disposed when the call ends, so one tool call costs one more
+/// named-pipe connection than a process-lifetime client would. That cost is accepted deliberately: in
+/// exchange the adapter survives having no owner at all, which is what makes <c>start_session</c>
+/// reachable, and it never holds a client whose owner has since gone away.
+/// </remarks>
 internal sealed class McpToolExecutor
 {
     /// <summary>The contract's per-frame ceiling, counted on the encoded PNG bytes (5 MiB).</summary>
     private const int MaximumScreenshotBytes = 5 * 1024 * 1024;
 
-    private readonly ISessionClient _client;
+    private readonly ISessionAccessor _sessions;
+    private readonly IHostStarter _hostStarter;
     private readonly TextWriter _diagnostics;
 
-    internal McpToolExecutor(ISessionClient client, TextWriter diagnostics)
+    internal McpToolExecutor(ISessionAccessor sessions, IHostStarter hostStarter, TextWriter diagnostics)
     {
-        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(sessions);
+        ArgumentNullException.ThrowIfNull(hostStarter);
         ArgumentNullException.ThrowIfNull(diagnostics);
 
-        _client = client;
+        _sessions = sessions;
+        _hostStarter = hostStarter;
         _diagnostics = diagnostics;
     }
 
-    /// <summary>Runs one tool and returns the serialized MCP tool result.</summary>
-    internal async Task<string> ExecuteAsync(SessionTool tool, JsonElement? arguments, CancellationToken cancellationToken)
+    /// <summary>Runs one session tool and returns the serialized MCP tool result.</summary>
+    internal async Task<string> ExecuteAsync(
+        SessionTool tool,
+        JsonElement? arguments,
+        CancellationToken cancellationToken)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
         SessionStatus? status = null;
@@ -42,10 +56,11 @@ internal sealed class McpToolExecutor
         string result;
         try
         {
-            SessionStatus observed = await _client.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+            await using ResolvedSession session = await _sessions.ResolveAsync(cancellationToken).ConfigureAwait(false);
+            SessionStatus observed = await session.Client.GetStatusAsync(cancellationToken).ConfigureAwait(false);
             observed.Validate();
             status = observed;
-            result = await InvokeAsync(tool, arguments, observed, cancellationToken).ConfigureAwait(false);
+            result = await InvokeAsync(session.Client, tool, arguments, observed, cancellationToken).ConfigureAwait(false);
         }
         catch (SessionOperationException error)
         {
@@ -59,7 +74,39 @@ internal sealed class McpToolExecutor
         return result;
     }
 
-    private async Task<string> InvokeAsync(
+    /// <summary>Runs one adapter-local tool and returns the serialized MCP tool result.</summary>
+    internal async Task<string> ExecuteLocalAsync(McpLocalTool tool, CancellationToken cancellationToken)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        SessionOperationException? failure = null;
+        string result;
+        try
+        {
+            result = tool switch
+            {
+                McpLocalTool.StartSession => await StartSessionAsync(cancellationToken).ConfigureAwait(false),
+                _ => throw new ArgumentOutOfRangeException(nameof(tool), tool, "Unknown local tool."),
+            };
+        }
+        catch (SessionOperationException error)
+        {
+            failure = error;
+            result = ErrorResult(error, null);
+        }
+
+        stopwatch.Stop();
+        McpLog.ToolCall(_diagnostics, McpLocalToolTable.NameOf(tool), stopwatch.ElapsedMilliseconds, failure?.Code, null);
+        return result;
+    }
+
+    private async Task<string> StartSessionAsync(CancellationToken cancellationToken)
+    {
+        await _hostStarter.StartAsync(cancellationToken).ConfigureAwait(false);
+        return OkResult();
+    }
+
+    private static async Task<string> InvokeAsync(
+        ISessionClient client,
         SessionTool tool,
         JsonElement? arguments,
         SessionStatus status,
@@ -73,7 +120,7 @@ internal sealed class McpToolExecutor
 
             case SessionTool.Screenshot:
             {
-                byte[] frame = await _client.ScreenshotAsync(cancellationToken).ConfigureAwait(false);
+                byte[] frame = await client.ScreenshotAsync(cancellationToken).ConfigureAwait(false);
                 if (frame.Length > MaximumScreenshotBytes)
                 {
                     throw new SessionOperationException(
@@ -90,7 +137,7 @@ internal sealed class McpToolExecutor
                 int x = reader.RequireInt32("x");
                 int y = reader.RequireInt32("y");
                 RequireScreenCoordinate(status, x, y);
-                await _client.MouseMoveAsync(x, y, cancellationToken).ConfigureAwait(false);
+                await client.MouseMoveAsync(x, y, cancellationToken).ConfigureAwait(false);
                 return OkResult();
             }
 
@@ -102,7 +149,7 @@ internal sealed class McpToolExecutor
                 int count = reader.RequireInt32("count");
                 RequireClickCount(count);
                 RequireScreenCoordinate(status, x, y);
-                await _client.MouseClickAsync(x, y, button, count, cancellationToken).ConfigureAwait(false);
+                await client.MouseClickAsync(x, y, button, count, cancellationToken).ConfigureAwait(false);
                 return OkResult();
             }
 
@@ -113,7 +160,7 @@ internal sealed class McpToolExecutor
                 int deltaX = reader.RequireInt32("deltaX");
                 int deltaY = reader.RequireInt32("deltaY");
                 RequireScreenCoordinate(status, x, y);
-                await _client.MouseScrollAsync(x, y, deltaX, deltaY, cancellationToken).ConfigureAwait(false);
+                await client.MouseScrollAsync(x, y, deltaX, deltaY, cancellationToken).ConfigureAwait(false);
                 return OkResult();
             }
 
@@ -121,14 +168,14 @@ internal sealed class McpToolExecutor
             {
                 string text = reader.RequireString("text");
                 RequireText(text);
-                await _client.KeyTypeAsync(text, cancellationToken).ConfigureAwait(false);
+                await client.KeyTypeAsync(text, cancellationToken).ConfigureAwait(false);
                 return OkResult();
             }
 
             case SessionTool.KeyPress:
             {
                 IReadOnlyList<SessionKey> keys = reader.RequireKeys("keys");
-                await _client.KeyPressAsync(keys, cancellationToken).ConfigureAwait(false);
+                await client.KeyPressAsync(keys, cancellationToken).ConfigureAwait(false);
                 return OkResult();
             }
 
