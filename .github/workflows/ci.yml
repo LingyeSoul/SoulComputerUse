@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and contract tests
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore SoulComputerUse.slnx
+
+      - name: Build Release
+        run: dotnet build SoulComputerUse.slnx -c Release --no-restore
+
+      - name: Run contract tests
+        run: >
+          dotnet test tests/SoulComputerUse.ContractTests/SoulComputerUse.ContractTests.csproj
+          -c Release --no-build --no-restore
+          --logger "trx;LogFileName=contract.trx"
+          --results-directory artifacts/test-results
+
+      - name: Upload contract test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-results
+          path: artifacts/test-results
+          if-no-files-found: ignore
+
+      - name: Validate the PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $scripts = @(
+            'scripts/package-release.ps1',
+            'skills/soul-computer-use/scripts/install.ps1'
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $messages = ($errors | ForEach-Object { $_.Message }) -join '; '
+              throw "$script does not parse: $messages"
+            }
+          }
+
+      - name: Package a CI build
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: >
+          pwsh -NoProfile -File ./scripts/package-release.ps1
+          -Version "0.0.0-ci.${{ github.run_number }}"
+          -OutputDirectory artifacts/release
+
+      - name: Upload the CI build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoulComputerUse-win-x64-ci
+          path: |
+            artifacts/release/SoulComputerUse-win-x64.zip
+            artifacts/release/soul-computer-use-skill.zip
+            artifacts/release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  skill:
+    name: Skill discovery
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify the Vercel skills CLI discovers and installs the skill
+        shell: bash
+        env:
+          DISABLE_TELEMETRY: "1"
+          CI: "true"
+        run: |
+          set -euo pipefail
+          output="$(npx --yes skills@1.7.4 add ./skills --list -a opencode 2>&1)"
+          printf '%s\n' "$output"
+          grep -q 'soul-computer-use' <<<"$output"
+
+          install_dir="$(mktemp -d)"
+          cd "$install_dir"
+          npx --yes skills@1.7.4 add "$GITHUB_WORKSPACE/skills" \
+            --skill soul-computer-use -a opencode --copy -y
+          test -f .agents/skills/soul-computer-use/SKILL.md
+          test -f .agents/skills/soul-computer-use/scripts/install.ps1
+          test -f .agents/skills/soul-computer-use/references/install.md
+          test -f .agents/skills/soul-computer-use/references/usage.md
+          test -f .agents/skills/soul-computer-use/references/build-from-source.md

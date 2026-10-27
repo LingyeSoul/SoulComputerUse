@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, for example v1.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Validate the tag and derive the version
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tags must look like v1.2.3 or v1.2.3-rc.1; got '$tag'."
+          }
+
+          $version = $Matches[1]
+          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=$version"
+          Add-Content -Path $env:GITHUB_ENV -Value "PRERELEASE=$($version.Contains('-'))"
+
+      - name: Restore
+        run: dotnet restore SoulComputerUse.slnx
+
+      - name: Build Release
+        run: dotnet build SoulComputerUse.slnx -c Release --no-restore
+
+      - name: Run contract tests
+        run: >
+          dotnet test tests/SoulComputerUse.ContractTests/SoulComputerUse.ContractTests.csproj
+          -c Release --no-build --no-restore
+
+      - name: Package the release
+        shell: pwsh
+        run: >
+          pwsh -NoProfile -File ./scripts/package-release.ps1
+          -Version $env:VERSION
+          -OutputDirectory artifacts/release
+
+      - name: Create the GitHub Release
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:RELEASE_TAG
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists; the assets will be replaced."
+            return
+          }
+
+          $arguments = @(
+            'release', 'create', $tag,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--title', "SoulComputerUse $tag",
+            '--generate-notes',
+            '--verify-tag'
+          )
+          if ($env:PRERELEASE -eq 'True') {
+            $arguments += '--prerelease'
+          }
+
+          gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Upload the release assets
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $expected = @(
+            'SoulComputerUse-win-x64.zip',
+            'soul-computer-use-skill.zip',
+            'SHA256SUMS.txt'
+          )
+
+          $missing = @($expected | Where-Object { -not (Test-Path -LiteralPath (Join-Path 'artifacts/release' $_) -PathType Leaf) })
+          if ($missing.Count -gt 0) {
+            throw "The package step did not produce: $($missing -join ', ')."
+          }
+
+          $assets = $expected | ForEach-Object { Join-Path 'artifacts/release' $_ }
+          gh release upload $env:RELEASE_TAG $assets --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release upload failed with exit code $LASTEXITCODE."
+          }
