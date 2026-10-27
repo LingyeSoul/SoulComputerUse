@@ -7,6 +7,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SoulComputerUse.Core\SoulComputerUse.Core.csproj" />
+    <EmbeddedResource Include="..\..\assets\brand\soul-computer-use.ico">
+      <LogicalName>SoulComputerUse.Windows.BrandIcon.ico</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

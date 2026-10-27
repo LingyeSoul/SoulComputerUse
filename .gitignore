@@ -58,3 +58,4 @@ Thumbs.db
 desktop.ini
 .DS_Store
 /.mimosa
+/assets/brand/__pycache__

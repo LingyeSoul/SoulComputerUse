@@ -29,6 +29,10 @@ internal static class NativeMethods
     internal const uint WmLButtonUp = 0x0202;
     internal const uint WmDpiChanged = 0x02E0;
     internal const uint WmGetMinMaxInfo = 0x0024;
+    internal const uint WmSetIcon = 0x0080;
+
+    internal const nint IconSmall = 0;
+    internal const nint IconBig = 1;
 
     internal const uint WmSysCommand = 0x0112;
     internal const int ScMinimize = 0xF020;

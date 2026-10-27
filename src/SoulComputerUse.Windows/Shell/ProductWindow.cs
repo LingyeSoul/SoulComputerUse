@@ -63,6 +63,8 @@ public sealed class ProductWindow : IDisposable
         int dpi = DpiProbe.GetWindowDpi(handle);
         int textScalePercent = TextScaleProbe.GetTextScalePercent();
         _metrics = CaptionMetrics.Create(ReadClientWidth(handle), dpi, textScalePercent);
+        _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSetIcon, NativeMethods.IconBig, BrandIcon.Handle);
+        _ = NativeMethods.SendMessageW(handle, NativeMethods.WmSetIcon, NativeMethods.IconSmall, BrandIcon.Handle);
     }
 
     /// <summary>The window handle, or zero once the window was destroyed.</summary>
@@ -1010,12 +1012,12 @@ public sealed class ProductWindow : IDisposable
             ClassExtraBytes = 0,
             WindowExtraBytes = 0,
             Instance = instance,
-            Icon = 0,
+            Icon = BrandIcon.Handle,
             Cursor = NativeMethods.LoadArrowCursor(),
             BackgroundBrush = 0,
             MenuName = null,
             ClassName = WindowClassName,
-            SmallIcon = 0,
+            SmallIcon = BrandIcon.Handle,
         };
         _classAtom = NativeMethods.RegisterClassExW(ref windowClass);
         if (_classAtom == 0)

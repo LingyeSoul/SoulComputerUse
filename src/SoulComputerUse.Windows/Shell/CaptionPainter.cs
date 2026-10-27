@@ -128,8 +128,7 @@ public static class CaptionPainter
     private static void PaintIcon(Graphics graphics, CaptionMetrics metrics, CaptionPaintRequest request)
     {
         Rectangle icon = metrics.IconBounds;
-        using SolidBrush iconBrush = new(request.Palette.CaptionIcon.ToDrawingColor());
-        graphics.FillRectangle(iconBrush, icon);
+        BrandIcon.Draw(graphics, icon);
 
         int dotEdge = Math.Max(4, metrics.StatusDotPixels);
         Rectangle dot = new(
