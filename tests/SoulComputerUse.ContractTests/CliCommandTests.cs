@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using SoulComputerUse.Cli;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.ContractTests;
 
@@ -127,6 +128,15 @@ public sealed class CliCommandTests
         AssertParseCode(SessionErrorCode.InputInvalid, ["shot", "--format", "png"]);
         AssertParseCode(SessionErrorCode.InputInvalid, ["shot", "--out"]);
         AssertParseCode(SessionErrorCode.InputInvalid, ["shot", "--out", " "]);
+    }
+
+    [TestMethod]
+    public void StartIsALocalCommandThatTakesNoArguments()
+    {
+        Assert.AreEqual(CliCommandKind.Start, CliCommandParser.Parse(["start"]).Kind);
+        Assert.AreEqual(CliCommandKind.Start, CliCommandParser.ParseLine("start").Kind);
+        AssertParseCode(SessionErrorCode.InputInvalid, ["start", "--wait"]);
+        StringAssert.Contains(CliHelp.Text, "start");
     }
 
     [TestMethod]
@@ -376,6 +386,18 @@ public sealed class CliCommandTests
     }
 
     [TestMethod]
+    public async Task StartInThePromptReportsOkWithoutTouchingTheSession()
+    {
+        TestHarness harness = TestHarness.Create(CreateStatus(null), "start\nquit\n");
+
+        int exitCode = await harness.Runner.RunReplAsync(CancellationToken.None);
+
+        Assert.AreEqual(0, exitCode);
+        Assert.AreEqual(0, harness.Client.Calls);
+        Assert.AreEqual(1, harness.HostStarter.StartCount);
+    }
+
+    [TestMethod]
     public async Task NoArgumentsStartsThePromptAndEndOfInputExits()
     {
         TestHarness harness = TestHarness.Create(CreateStatus(null), string.Empty);
@@ -456,16 +478,30 @@ public sealed class CliCommandTests
     private sealed record TestHarness(
         CliRunner Runner,
         FakeSessionClient Client,
+        FakeHostStarter HostStarter,
         StringWriter Output,
         StringWriter Error)
     {
         internal static TestHarness Create(SessionStatus status, string input)
         {
             FakeSessionClient client = new(status);
+            FakeHostStarter hostStarter = new();
             StringWriter output = new(CultureInfo.InvariantCulture) { NewLine = "\n" };
             StringWriter error = new(CultureInfo.InvariantCulture) { NewLine = "\n" };
-            CliRunner runner = new(client, new StringReader(input), output, error);
-            return new TestHarness(runner, client, output, error);
+            CliRunner runner = new(client, hostStarter, new StringReader(input), output, error);
+            return new TestHarness(runner, client, hostStarter, output, error);
+        }
+    }
+
+    /// <summary>A host starter that only counts calls, so a test proves prompt start never re-resolves.</summary>
+    private sealed class FakeHostStarter : IHostStarter
+    {
+        internal int StartCount { get; private set; }
+
+        public Task<HostStartOutcome> StartAsync(CancellationToken cancellationToken)
+        {
+            StartCount++;
+            return Task.FromResult(HostStartOutcome.Started);
         }
     }
 

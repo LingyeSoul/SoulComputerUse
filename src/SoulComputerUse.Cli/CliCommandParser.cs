@@ -36,6 +36,7 @@ internal static class CliCommandParser
 
         return args[0] switch
         {
+            "start" => CreateWithoutArguments(CliCommandKind.Start, args, "The 'start' command takes no arguments."),
             "status" => CreateWithoutArguments(CliCommandKind.Status, args, "The 'status' command takes no arguments."),
             "shot" => CreateScreenshot(args),
             "move" => CreateMove(args),

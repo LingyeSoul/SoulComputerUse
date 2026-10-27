@@ -4,14 +4,15 @@ using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.Cli;
 
 /// <summary>
-/// Executes parsed commands against the shared session client and owns the interactive prompt.
-/// Output is the contract's structured line form: one status line, <c>ok</c> for a completed
-/// action, or <c>&lt;CODE&gt; &lt;message&gt;</c> on the error writer. Typed text is never written
-/// to either writer.
+/// Executes parsed commands against the shared session client or the host starter and owns the
+/// interactive prompt. Output is the contract's structured line form: one status line, <c>ok</c> for
+/// a completed action, or <c>&lt;CODE&gt; &lt;message&gt;</c> on the error writer. Typed text is never
+/// written to either writer.
 /// </summary>
 internal sealed class CliRunner
 {
@@ -21,19 +22,27 @@ internal sealed class CliRunner
         "The screenshot could not be written to the requested output. Check that the target directory exists and is writable.";
 
     private readonly ISessionClient _client;
+    private readonly IHostStarter _hostStarter;
     private readonly TextReader _input;
     private readonly TextWriter _output;
     private readonly TextWriter _error;
 
-    /// <summary>Creates a runner over one session client and one pair of text writers.</summary>
-    internal CliRunner(ISessionClient client, TextReader input, TextWriter output, TextWriter error)
+    /// <summary>Creates a runner over one session client, the host starter, and one pair of text writers.</summary>
+    internal CliRunner(
+        ISessionClient client,
+        IHostStarter hostStarter,
+        TextReader input,
+        TextWriter output,
+        TextWriter error)
     {
         ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(hostStarter);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
 
         _client = client;
+        _hostStarter = hostStarter;
         _input = input;
         _output = output;
         _error = error;
@@ -119,6 +128,10 @@ internal sealed class CliRunner
     {
         switch (command.Kind)
         {
+            case CliCommandKind.Start:
+                await _hostStarter.StartAsync(cancellationToken);
+                return WriteOk();
+
             case CliCommandKind.Status:
                 return await ExecuteStatusAsync(cancellationToken);
 

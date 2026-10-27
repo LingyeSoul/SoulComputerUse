@@ -7,6 +7,7 @@ internal static class CliHelp
     internal const string Text = """
         Usage: scu [command [arguments]]
         Commands:
+          start
           status
           shot [--out <path>]
           move <x> <y>
@@ -19,5 +20,6 @@ internal static class CliHelp
           --help
         Run without arguments to open the interactive prompt (scu>). A command given on the
         command line runs once and exits. quit exits the prompt without closing the session.
+        start is local: it opens the product window and waits for the operator to log on there.
         """;
 }

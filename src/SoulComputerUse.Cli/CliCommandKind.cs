@@ -32,4 +32,7 @@ internal enum CliCommandKind
 
     /// <summary>Prints the command table.</summary>
     Help = 8,
+
+    /// <summary>Opens the product window so the operator can log on there.</summary>
+    Start = 9,
 }

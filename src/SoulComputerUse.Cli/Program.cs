@@ -5,6 +5,8 @@ using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Discovery;
 using SoulComputerUse.Windows.Hosting.Headless;
+using SoulComputerUse.Windows.Hosting.Launch;
+using SoulComputerUse.Windows.Hosting.Startup.Split;
 using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Cli;
@@ -18,7 +20,8 @@ namespace SoulComputerUse.Cli;
 /// A command line is validated before the machine is probed, so a typo is answered as an input error
 /// rather than as "no owner". A failed discovery is reported as one contract error line on the error
 /// stream with a non-zero exit code; the process prints no stack trace, whose absolute paths the log
-/// whitelist forbids.
+/// whitelist forbids. start is local like help and quit: it opens the product window before any
+/// session is resolved, and the operator logs on there.
 /// <para>
 /// Becoming the owner is opt-in: only <c>SOULCOMPUTERUSE_ALLOW_HEADLESS=1</c> injects the headless
 /// starter, and with the variable absent this process still refuses a free lock with
@@ -32,9 +35,9 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        CliCommand? command = null;
         if (args.Length > 0)
         {
-            CliCommand command;
             try
             {
                 command = CliCommandParser.Parse(args);
@@ -47,8 +50,9 @@ internal static class Program
                 return FailureExitCode;
             }
 
-            // Help and quit are the two commands section 6 marks as local. They must work whether or
-            // not a session exists, so neither probes the machine; CliRunner answers both the same way.
+            // Help and quit cannot fail, so they are answered here without touching the machine.
+            // start is local too but can fail, so it runs inside the process-boundary try below;
+            // CliRunner answers all three the same way once a session exists.
             if (command.Kind == CliCommandKind.Help)
             {
                 Console.Out.WriteLine(CliHelp.Text);
@@ -64,6 +68,24 @@ internal static class Program
 
         try
         {
+            HostProcessLauncher hostStarter = new(
+                new OwnerProbe(),
+                new ConsoleSessionGuard(),
+                new ElevationGuard(),
+                new HostProcessStarter(),
+                new BlockingWaitClock(),
+                AppContext.BaseDirectory);
+
+            // start is local: it opens the product window and the operator logs on there. It is
+            // answered before the session is resolved, like help and quit, and runs inside this try
+            // so a refusal takes the existing error path instead of escaping as a stack trace.
+            if (command is not null && command.Kind == CliCommandKind.Start)
+            {
+                await hostStarter.StartAsync(CancellationToken.None);
+                Console.Out.WriteLine(OkLine);
+                return 0;
+            }
+
             // Section 3 allows a CLI or MCP process to become the session owner when the lock is free
             // and no owner answers. That path is behind HeadlessStarterActivation's environment gate:
             // without SOULCOMPUTERUSE_ALLOW_HEADLESS=1 discovery gets no starter and still fails a free
@@ -82,7 +104,7 @@ internal static class Program
                 starter);
 
             await using ResolvedSession session = await resolver.ResolveAsync(CancellationToken.None);
-            CliRunner runner = new(session.Client, Console.In, Console.Out, Console.Error);
+            CliRunner runner = new(session.Client, hostStarter, Console.In, Console.Out, Console.Error);
 
             if (args.Length == 0)
             {
