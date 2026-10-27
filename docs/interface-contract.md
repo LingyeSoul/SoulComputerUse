@@ -1,4 +1,4 @@
-# SoulComputerUse 接口契约（v2.7 · 定稿：单实例锁句柄模型、全机唯一锁、确认即注销、同账户 child session 地基（helper exe 经 UAC 开启/关回）、临时 HKCU Run 启动项拉起代理（v2.7：RDP alternate shell 在 child session 下经 2026-10-27 实测被忽略，机制改定，见 §3.1）、门禁三档——`hello-enrolled` Hello 强验证 / `system-credential` **子会话系统登录验证**（2026-10-26 用户实测确认：全新子会话先出 Windows 登录界面、密码由用户亲手输入；连接前必须确认无遗留已登录子会话）/ `none` 拒启）
+# SoulComputerUse 接口契约（v2.8 · 定稿：单实例锁句柄模型、全机唯一锁、确认即注销、同账户 child session 地基（helper exe 经 UAC 开启/关回）、临时 HKCU Run 启动项拉起代理（v2.7：RDP alternate shell 在 child session 下经 2026-10-27 实测被忽略，机制改定，见 §3.1）、门禁三档——`hello-enrolled` Hello 强验证 / `system-credential` **子会话系统登录验证**（2026-10-26 用户实测确认：全新子会话先出 Windows 登录界面、密码由用户亲手输入；连接前必须确认无遗留已登录子会话）/ `none` 拒启；agent 请求建会话（`scu start` / `start_session`：本地拉起宿主窗口，登录仍由操作者亲手完成；登录等待期按 `E_NOT_READY` 可重试））
 
 > 范围：会话状态机、错误码、单实例锁、代理启动与自退、IPC、MCP 工具、CLI 命令、凭据流程、关闭语义、坐标模型、脱敏与日志白名单、非目标。
 > 本文全部使用虚构占位值（`example-session`、`192.0.2.10`、`/path/to/project`、`REDACTED`），不含真实路径、账户与机器信息。
@@ -75,12 +75,15 @@
 | `E_COORD_OUT_OF_RANGE` | 坐标超出子会话屏幕边界（message 含边界值） | false | ready/blocked |
 | `E_SCREENSHOT_TOO_LARGE` | 截图编码后超过大小上限 | false | ready/blocked |
 | `E_AGENT_ERROR` | 子会话执行动作失败（透传脱敏原因） | true | ready |
+| `E_HOST_LAUNCH_FAILED` | 宿主进程未能从调用方环境中拉起（安装目录缺宿主可执行文件、调用方不在交互控制台会话、调用方已提权、进程创建失败、或宿主在取得锁之前退出） | false | starting |
 
 `message` 规则：只含固定模板 + 参数化的数值/枚举（坐标、边界、状态名、原因码），不得含 §10 黑名单字段。`E_AGENT_ERROR` 的原因**只允许枚举原因码**（如 `uac-shield`、`window-gone`、`input-rejected`），代理不得发送自由文本原因。
 
 ## 3. 单实例锁（全机唯一）
 
-- **进程拓扑**：唯一 **owner 进程**持有锁——GUI `Host`，或 CLI/MCP 在无 owner 时自行拉起的 **headless 会话进程**（二选一，全机仍只有一个 owner）。CLI 与 MCP server 一律先作为 **IPC 客户端**连 owner；连不上且锁空闲时才由自己起会话并持锁，锁被占则按客户端身份排队失败退出（`E_LOCK_HELD`）。
+- **进程拓扑**：唯一 **owner 进程**持有锁——生产路径为 GUI `Host`；CLI/MCP 在无 owner 时自行拉起 **headless 会话进程**并持锁的旧路径保留为**非生产、默认关闭**的并列路线（`SOULCOMPUTERUSE_ALLOW_HEADLESS`，且本构建后端为空）。CLI 与 MCP server 一律先作为 **IPC 客户端**连 owner；连不上时按下段处理，锁被占则按客户端身份排队失败退出（`E_LOCK_HELD`）。
+- **连不上 owner 时**：显式请求建会话——CLI `start` / MCP `start_session`——则从自身安装目录拉起 GUI 宿主 `SoulComputerUse.Host.exe --new-session`，由宿主取得并持有单实例锁；未请求建会话的调用不自行启动会话，显式失败（无 owner 且锁空闲时按 `E_NOT_READY`，retryable，消息指引先调用 `start` / `start_session`）。
+- **启动中识别（只读）**：CLI/MCP 发现锁对象存在但 owner 管道不可达时，若本账户所有权记录显示持有者进程存活且启动时间匹配、状态属于 {`starting`, `connecting`}，按 `E_NOT_READY`（retryable）回答，消息说明「会话正在启动，可能正在等待操作者登录」；其余情况维持 `E_LOCK_HELD`（外来句柄判定仍受特权限制，不变）。所有权记录在此路径上只读，不接管、不删除、不改写。
 - **对象**：命名 mutex，名字为固定 GUID 字符串 `Global\SoulComputerUse-{4C1F0E2A-9B7D-4E8A-A6C3-5D9E0F1A2B34}`（本 GUID 即契约钉死值，实现原样引用为代码常量，不再生成、不再变更；`Global\` 前缀保证跨 Windows 用户、跨 CLI/MCP 全机唯一；无权限创建时显式失败，不降级不重试）。
 - **占用模型（v2.3 终版：句柄存在即占用）**：`CreateMutexW(initiallyOwned: false)` 建/开命名对象、**不要所有权**；占用判定 = `ERROR_ALREADY_EXISTS`；释放 = `CloseHandle`（任意线程、幂等），owner 句柄持有到进程退出。选它的理由：这是 Windows 官方单实例标准做法；无所有权即无线程亲缘，关闭序列不会被 CLR 异常从中间打断；abandoned 在生产形状下是死分支（owner 死则句柄关、对象销毁），不为它引入后台线程与握手复杂度。第三方句柄吊对象的风险评估为**非阻塞**：名字是本产品独有 GUID，句柄随进程退出自动关闭，误判「被占」是短暂现象、重试即可，不设解绑命令，但 `E_LOCK_HELD` 的错误消息要说明「当前有进程持锁」及查看持锁进程的方法。
 - **等待语义**：**零等待**——`CreateMutexW` 返回 `ERROR_ALREADY_EXISTS` 即被占，立刻失败退出，不等待、不排队、不抢。
@@ -221,6 +224,12 @@
 ```
 返回：`{ "ok": true }`。
 
+### 5.8 `start_session`
+```json
+{ "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false, "required": [] } }
+```
+无会话且锁空闲时拉起产品窗口（`SoulComputerUse.Host.exe --new-session`），窗口显示 Windows 登录界面，登录仍由操作者本人完成；宿主取得锁后即返回 `{ "ok": true }`——**不等待登录完成**（登录是操作者的手动动作，上限 10 分钟，之后的等待交给 `get_status` 轮询）。已有会话时幂等返回同样结果，不重复开窗。等待登录不是本工具的工作：失败与未就绪按 §2 错误对象返回。**本工具是 MCP 适配器本地工具，不进入 owner/agent 管道的方法集。**
+
 ## 6. CLI 命令表（与 MCP 工具一一对应）
 
 `scu`（SoulComputerUse CLI，REPL 形态；单命令模式同参数）：
@@ -234,9 +243,10 @@
 | `scroll <x> <y> <dx> <dy>` | `mouse_scroll` | 同 schema |
 | `type <text>` | `key_type` | text（≤1000 字符） |
 | `key <k1>+<k2>…` | `key_press` | 同 schema 枚举 |
+| `start` | `start_session` | 无 |
 | `quit` | （本地）触发关闭确认流程 | 无 |
 
-CLI 与 MCP server 默认作为 §3 的 IPC 客户端连接 owner 进程；仅当无 owner 且锁空闲时才自行起会话并持锁。REPL 输出为结构化行（状态 + 错误码），不回显键入正文。
+CLI 与 MCP server 默认作为 §3 的 IPC 客户端连接 owner 进程；`start` 与 `quit`、`--help` 同为**本地命令**：不要求现有会话，`start` 拉起宿主窗口，宿主取得单实例锁后即返回——**不等待操作者登录完成**（登录是操作者的手动动作，上限 10 分钟，之后的等待交给 `status` 轮询）。REPL 输出为结构化行（状态 + 错误码），不回显键入正文。
 
 ## 7. 凭据流程契约（每次开工系统验证门禁，按设备能力三档）
 
