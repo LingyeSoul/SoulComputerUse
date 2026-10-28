@@ -28,8 +28,10 @@ namespace SoulComputerUse.Windows.Hosting.Launch;
 /// </para>
 /// <para>
 /// <b>Same process.</b> One semaphore is held for the whole of every start, so two callers in this process
-/// queue instead of opening two windows; the queued caller then observes the lock or the pipe and returns
-/// <see cref="HostStartOutcome.AlreadyRunning"/>.
+/// queue instead of opening two windows. The queued caller then runs the decision again from its own fresh
+/// probes: an answering pipe is <see cref="HostStartOutcome.AlreadyRunning"/>, a lock whose record still
+/// names a live starting owner is the retryable <c>E_NOT_READY</c>, and any other held lock is
+/// <c>E_LOCK_HELD</c>.
 /// </para>
 /// <para>
 /// <b>Across processes.</b> The launcher deliberately has no cross-process lock. Two callers can both pass

@@ -32,11 +32,13 @@ public static class HostLaunchMessages
 
     /// <summary>
     /// The explanation when the operating system refused to create the host process, including a caller's job
-    /// object that does not allow the host to break away and outlive the caller.
+    /// object that does not allow the host to break away and outlive the caller. It names the one fallback that
+    /// remains when the refusal repeats: starting the host once by hand.
     /// </summary>
     public const string ProcessCreationFailed =
         "The host process could not be created, so no session was started. Retry start from an ordinary, non-elevated "
-        + "terminal; if the failure repeats, the calling environment does not allow the host to outlive this process.";
+        + "terminal; if the failure repeats, the calling environment does not allow the host to outlive this process. "
+        + "To start a session anyway, start the host once by hand with '" + HostExecutablePath.FileName + " --new-session'.";
 
     /// <summary>
     /// The explanation when the launched host ended before it took the lock. The placeholder is the exit code,

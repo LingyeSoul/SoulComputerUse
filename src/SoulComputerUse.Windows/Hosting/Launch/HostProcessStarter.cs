@@ -168,7 +168,9 @@ public sealed class HostProcessStarter : IHostProcessStarter
     /// <remarks>
     /// Not thread safe by design: the launcher polls it from one thread. <see cref="HasExited"/> and
     /// <see cref="ExitCode"/> are plain queries, so a second read repeats the same answer instead of
-    /// consuming a wait.
+    /// consuming a wait. Reading either after <see cref="Dispose"/> throws
+    /// <see cref="ObjectDisposedException"/>: a closed handle cannot answer, and the wait-result
+    /// message a closed handle would otherwise produce hides the real cause.
     /// </remarks>
     private sealed class ProcessHandle : IHostProcessHandle
     {
@@ -229,10 +231,19 @@ public sealed class HostProcessStarter : IHostProcessStarter
 
         /// <summary>
         /// A zero-length wait: signaled means the process ended. A zero-length wait never consumes the
-        /// signal, so every later read produces the same answer.
+        /// signal, so every later read produces the same answer. A closed handle is refused before the
+        /// wait, because a wait on a closed handle reports a wait-result failure that hides the real
+        /// cause.
         /// </summary>
         private bool IsSignaled()
         {
+            if (_processHandle == 0)
+            {
+                throw new ObjectDisposedException(
+                    nameof(ProcessHandle),
+                    "The process handle is already closed, so the host's exit state can no longer be observed.");
+            }
+
             uint waitResult = NativeMethods.WaitForSingleObject(_processHandle, 0);
             if (waitResult == NativeMethods.WaitObjectZero)
             {

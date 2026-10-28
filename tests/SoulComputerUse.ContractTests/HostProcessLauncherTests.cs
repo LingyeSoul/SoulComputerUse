@@ -253,16 +253,17 @@ public sealed class HostProcessLauncherTests
         fixture.Starter.OnStart = () =>
         {
             startEntered.Set();
-            releaseStart.Wait();
+            releaseStart.Wait(TimeSpan.FromSeconds(30));
         };
         HostProcessLauncher launcher = fixture.CreateLauncher();
 
         Task<HostStartOutcome> first = Task.Run(() => launcher.StartAsync(CancellationToken.None));
-        Assert.IsTrue(startEntered.Wait(TimeSpan.FromSeconds(5)), "The first start must reach the process creation step.");
-        Task<HostStartOutcome> second = launcher.StartAsync(CancellationToken.None);
-
+        Task<HostStartOutcome> second;
         try
         {
+            Assert.IsTrue(startEntered.Wait(TimeSpan.FromSeconds(5)), "The first start must reach the process creation step.");
+            second = launcher.StartAsync(CancellationToken.None);
+
             Assert.IsFalse(
                 second.IsCompleted,
                 "A second call in the same process must wait for the first instead of launching another host.");
@@ -290,6 +291,10 @@ public sealed class HostProcessLauncherTests
             HostLaunchMessages.ProcessCreationFailed);
 
         StringAssert.Contains(error.Message, "could not be created");
+        StringAssert.Contains(
+            error.Message,
+            "start the host once by hand with '" + HostExecutablePath.FileName + " --new-session'",
+            "The refused-job case must name the by-hand start the operator still has.");
         Assert.AreEqual(1, fixture.Starter.StartCount);
         Assert.AreEqual(
             1,

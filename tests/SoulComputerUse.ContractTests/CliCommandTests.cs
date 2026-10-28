@@ -368,6 +368,7 @@ public sealed class CliCommandTests
         string output = harness.Output.ToString();
         string[] expectedInvocations =
         [
+            "start",
             "status",
             "shot [--out <path>]",
             "move <x> <y>",

@@ -18,6 +18,11 @@ namespace SoulComputerUse.Windows.Hosting.Launch;
 /// required to be thread safe; the launcher reads them from a single thread for the life of the
 /// handle.
 /// </para>
+/// <para>
+/// <see cref="IDisposable.Dispose"/> closes the observation and is idempotent. After it, reading
+/// <see cref="HasExited"/> or <see cref="ExitCode"/> throws <see cref="ObjectDisposedException"/>
+/// rather than reporting state a closed handle cannot prove.
+/// </para>
 /// </remarks>
 public interface IHostProcessHandle : IDisposable
 {

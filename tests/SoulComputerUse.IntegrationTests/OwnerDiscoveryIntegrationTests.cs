@@ -46,13 +46,18 @@ public sealed class OwnerDiscoveryIntegrationTests
     [TestCleanup]
     public void AssertNothingIsLeftBehind()
     {
-        Assert.IsFalse(
-            SingleInstanceLock.IsHeldByAnyone(_lockName),
-            "The case's own lock object must be gone afterwards, otherwise the case leaked a holder.");
-
-        if (Directory.Exists(_root))
+        try
         {
-            Directory.Delete(_root, recursive: true);
+            Assert.IsFalse(
+                SingleInstanceLock.IsHeldByAnyone(_lockName),
+                "The case's own lock object must be gone afterwards, otherwise the case leaked a holder.");
+        }
+        finally
+        {
+            if (Directory.Exists(_root))
+            {
+                Directory.Delete(_root, recursive: true);
+            }
         }
     }
 

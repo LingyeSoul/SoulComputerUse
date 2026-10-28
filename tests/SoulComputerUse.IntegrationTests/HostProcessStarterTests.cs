@@ -75,6 +75,29 @@ public sealed class HostProcessStarterTests
         Assert.IsNull(process.ExitCode);
     }
 
+    /// <summary>
+    /// A disposed handle owns no process handle any more, so it must refuse to answer instead of
+    /// reporting a wait-result failure that hides the real cause.
+    /// </summary>
+    [TestMethod]
+    public void ADisposedHandleRefusesFurtherReads()
+    {
+        HostProcessStarter starter = new();
+        using IHostProcessHandle process = starter.Start(TestSupportPath, SleepArguments());
+        _startedProcessIds.Add(process.ProcessId);
+
+        process.Dispose();
+
+        Assert.ThrowsExactly<ObjectDisposedException>(() =>
+        {
+            _ = process.HasExited;
+        });
+        Assert.ThrowsExactly<ObjectDisposedException>(() =>
+        {
+            _ = process.ExitCode;
+        });
+    }
+
     [TestMethod]
     public void AStartedProcessSurvivesTheCallersJobBeingClosed()
     {

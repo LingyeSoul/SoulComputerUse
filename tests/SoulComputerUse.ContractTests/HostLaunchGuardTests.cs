@@ -70,4 +70,16 @@ public sealed class HostLaunchGuardTests
             guard.IsCurrentProcessOnConsoleSession(),
             "An unreadable console session is not one a launch may rely on, so the guard must refuse instead of throwing.");
     }
+
+    [TestMethod]
+    public void AnUnreadableProcessSessionFailsClosed()
+    {
+        ConsoleSessionGuard guard = new(
+            readProcessSessionId: static () => throw new InvalidOperationException("ProcessIdToSessionId failed for this process."),
+            readConsoleSessionId: static () => 1);
+
+        Assert.IsFalse(
+            guard.IsCurrentProcessOnConsoleSession(),
+            "An unreadable process session is not a proven console session, so the guard must refuse instead of throwing.");
+    }
 }
