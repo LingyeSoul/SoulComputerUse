@@ -758,20 +758,38 @@ public sealed class AgentIpcTests
         {
             await pipe.WaitForConnectionAsync(token);
             using StreamReader reader = new(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, 4096, leaveOpen: true);
-            using StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
+            StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
             {
                 AutoFlush = true,
                 NewLine = "\n",
             };
 
-            await writer.WriteLineAsync(helloLine.AsMemory(), token);
             try
             {
-                _ = await reader.ReadLineAsync(token);
+                await writer.WriteLineAsync(helloLine.AsMemory(), token);
+                try
+                {
+                    _ = await reader.ReadLineAsync(token);
+                }
+                catch (IOException)
+                {
+                    // The client closed after refusing the hello frame.
+                }
             }
-            catch (IOException)
+            finally
             {
-                // The client closed after refusing the hello frame.
+                // The frame is already written because this writer auto-flushes, so the final flush
+                // on disposal races the client's close; a broken pipe here is the same expected close
+                // the read above tolerates. The write itself stays strict: a broken pipe there still
+                // fails the case.
+                try
+                {
+                    writer.Dispose();
+                }
+                catch (IOException)
+                {
+                    // The client closed its side first.
+                }
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -789,23 +807,40 @@ public sealed class AgentIpcTests
         {
             await pipe.WaitForConnectionAsync(token);
             using StreamReader reader = new(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, 4096, leaveOpen: true);
-            using StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
+            StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
             {
                 AutoFlush = true,
                 NewLine = "\n",
             };
 
-            await writer.WriteLineAsync(AgentHandshake.WriteHello(nonce).AsMemory(), token);
+            try
+            {
+                await writer.WriteLineAsync(AgentHandshake.WriteHello(nonce).AsMemory(), token);
 
-            string? ackLine = await reader.ReadLineAsync(token);
-            Assert.IsNotNull(ackLine);
-            IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
-            Assert.AreEqual(IpcFrameKind.Request, ack.Kind);
+                string? ackLine = await reader.ReadLineAsync(token);
+                Assert.IsNotNull(ackLine);
+                IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
+                Assert.AreEqual(IpcFrameKind.Request, ack.Kind);
 
-            string unknownCode = "{\"v\":1,\"type\":\"response\",\"id\":"
-                + ack.Request!.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                + ",\"ok\":false,\"error\":{\"code\":\"E_NOT_A_REAL_CODE\",\"message\":\"outside the contract\",\"retryable\":false,\"state\":null}}";
-            await writer.WriteLineAsync(unknownCode.AsMemory(), token);
+                string unknownCode = "{\"v\":1,\"type\":\"response\",\"id\":"
+                    + ack.Request!.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + ",\"ok\":false,\"error\":{\"code\":\"E_NOT_A_REAL_CODE\",\"message\":\"outside the contract\",\"retryable\":false,\"state\":null}}";
+                await writer.WriteLineAsync(unknownCode.AsMemory(), token);
+            }
+            finally
+            {
+                // The response is already written because this writer auto-flushes, so the final
+                // flush on disposal races the client's close; a broken pipe here is the same
+                // expected close the earlier reads tolerate. Every write above stays strict.
+                try
+                {
+                    writer.Dispose();
+                }
+                catch (IOException)
+                {
+                    // The client closed its side first.
+                }
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -822,41 +857,58 @@ public sealed class AgentIpcTests
         {
             await pipe.WaitForConnectionAsync(token);
             using StreamReader reader = new(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, 4096, leaveOpen: true);
-            using StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
+            StreamWriter writer = new(pipe, new UTF8Encoding(false), 4096, leaveOpen: true)
             {
                 AutoFlush = true,
                 NewLine = "\n",
             };
 
-            await writer.WriteLineAsync(AgentHandshake.WriteHello(nonce).AsMemory(), token);
+            try
+            {
+                await writer.WriteLineAsync(AgentHandshake.WriteHello(nonce).AsMemory(), token);
 
-            string? ackLine = await reader.ReadLineAsync(token);
-            Assert.IsNotNull(ackLine);
-            IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
-            Assert.AreEqual(IpcFrameKind.Request, ack.Kind);
-            string ackResponse = IpcFrameCodec.WriteResponse(
-                IpcResponse.CreateSuccess(ack.Request!.Id, SessionToolPayloads.OkResult()));
-            await writer.WriteLineAsync(ackResponse.AsMemory(), token);
+                string? ackLine = await reader.ReadLineAsync(token);
+                Assert.IsNotNull(ackLine);
+                IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
+                Assert.AreEqual(IpcFrameKind.Request, ack.Kind);
+                string ackResponse = IpcFrameCodec.WriteResponse(
+                    IpcResponse.CreateSuccess(ack.Request!.Id, SessionToolPayloads.OkResult()));
+                await writer.WriteLineAsync(ackResponse.AsMemory(), token);
 
-            await writer.WriteLineAsync(
-                """{"v":1,"type":"event","event":"telemetry","data":{"sequence":1}}""".AsMemory(),
-                token);
+                await writer.WriteLineAsync(
+                    """{"v":1,"type":"event","event":"telemetry","data":{"sequence":1}}""".AsMemory(),
+                    token);
 
-            string? requestLine = await reader.ReadLineAsync(token);
-            Assert.IsNotNull(requestLine);
-            IpcFrameParseResult request = IpcFrameCodec.Parse(requestLine);
-            Assert.AreEqual(IpcFrameKind.Request, request.Kind);
+                string? requestLine = await reader.ReadLineAsync(token);
+                Assert.IsNotNull(requestLine);
+                IpcFrameParseResult request = IpcFrameCodec.Parse(requestLine);
+                Assert.AreEqual(IpcFrameKind.Request, request.Kind);
 
-            SessionStatus status = new(
-                "ready",
-                SessionId,
-                AuthTier.SystemCredential,
-                GateStrength.Login,
-                new SessionScreen(1920, 1080),
-                null);
-            string statusResponse = IpcFrameCodec.WriteResponse(
-                IpcResponse.CreateSuccess(request.Request!.Id, SessionToolPayloads.WriteStatus(status)));
-            await writer.WriteLineAsync(statusResponse.AsMemory(), token);
+                SessionStatus status = new(
+                    "ready",
+                    SessionId,
+                    AuthTier.SystemCredential,
+                    GateStrength.Login,
+                    new SessionScreen(1920, 1080),
+                    null);
+                string statusResponse = IpcFrameCodec.WriteResponse(
+                    IpcResponse.CreateSuccess(request.Request!.Id, SessionToolPayloads.WriteStatus(status)));
+                await writer.WriteLineAsync(statusResponse.AsMemory(), token);
+            }
+            finally
+            {
+                // The response is already written because this writer auto-flushes, so the final
+                // flush on disposal races the client's close; a broken pipe here is the same
+                // expected close the earlier reads tolerate. Every write above stays strict.
+                try
+                {
+                    writer.Dispose();
+                }
+                catch (IOException)
+                {
+                    // The client closed its side first.
+                }
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
