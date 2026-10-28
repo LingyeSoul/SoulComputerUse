@@ -10,9 +10,9 @@ namespace SoulComputerUse.SessionAgent;
 
 /// <summary>
 /// The agent's view of its own desktop exposed through the shared session client surface. The state
-/// is <c>ready</c> when the desktop can receive input and <c>blocked</c> when the input desktop is
-/// locked, protected or non-interactive; the agent only starts serving after the shell bootstrap
-/// succeeded.
+/// is <c>ready</c> when the desktop can receive input, <c>blocked</c> when the input desktop is
+/// locked, protected or non-interactive, and <c>disconnected</c> when the session has no attached
+/// client; the agent only starts serving after the shell bootstrap succeeded.
 /// </summary>
 public sealed class DesktopSessionClient : ISessionClient
 {
@@ -35,8 +35,9 @@ public sealed class DesktopSessionClient : ISessionClient
     /// </param>
     /// <param name="availability">
     /// Probes the child session's desktop for the status call. A blocked verdict is reported as the
-    /// contract's <c>blocked</c> state while screenshots stay available; it never reaches the input
-    /// path, which keeps its own guard.
+    /// contract's <c>blocked</c> state, and a session whose client is gone as <c>disconnected</c>;
+    /// screenshots stay available while a locked or protected desktop still has a surface to read.
+    /// The probe never reaches the input path, which keeps its own guard.
     /// </param>
     /// <exception cref="ArgumentNullException">The surface or the availability probe is null.</exception>
     /// <exception cref="ArgumentException">The session id is empty, the tier is none, or the hint does not belong to the tier.</exception>
@@ -84,9 +85,12 @@ public sealed class DesktopSessionClient : ISessionClient
         cancellationToken.ThrowIfCancellationRequested();
         DesktopScreen screen = _surface.GetScreen();
         DesktopAvailabilityVerdict verdict = _availability();
-        SessionState state = verdict == DesktopAvailabilityVerdict.Usable
-            ? SessionState.Ready
-            : SessionState.Blocked;
+        SessionState state = verdict switch
+        {
+            DesktopAvailabilityVerdict.Usable => SessionState.Ready,
+            DesktopAvailabilityVerdict.Disconnected => SessionState.Disconnected,
+            _ => SessionState.Blocked,
+        };
         SessionStatus status = new(
             SessionStateNames.ToWireName(state),
             _sessionId,
@@ -99,10 +103,53 @@ public sealed class DesktopSessionClient : ISessionClient
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// A session with no attached client and a non-interactive session have no surface to read, so
+    /// they are refused with their contract code before the surface is touched. A locked or
+    /// protected desktop is still captured, because section 1.3 keeps the frame available there; a
+    /// capture that then fails is reported as blocked rather than as an agent defect.
+    /// </remarks>
+    /// <exception cref="SessionOperationException">
+    /// The session is disconnected or non-interactive, or a blocked desktop could not be captured.
+    /// </exception>
     public Task<byte[]> ScreenshotAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(_surface.CapturePng());
+
+        DesktopAvailabilityVerdict verdict = _availability();
+        if (verdict is DesktopAvailabilityVerdict.Disconnected or DesktopAvailabilityVerdict.BlockedNonInteractive)
+        {
+            throw Refuse(verdict);
+        }
+
+        try
+        {
+            return Task.FromResult(_surface.CapturePng());
+        }
+        catch (Exception error) when (error is InvalidOperationException or ArgumentException)
+        {
+            // The desktop can change between the probe and the capture. A blocked or disconnected
+            // verdict explains the failure; a usable verdict leaves a real agent defect, which the
+            // contract reports with an enumerated reason instead of the exception text.
+            DesktopAvailabilityVerdict afterFailure = _availability();
+            if (afterFailure != DesktopAvailabilityVerdict.Usable)
+            {
+                throw Refuse(afterFailure);
+            }
+
+            throw new SessionOperationException(
+                SessionErrorCode.AgentError,
+                "window-gone",
+                true);
+        }
+    }
+
+    private static SessionOperationException Refuse(DesktopAvailabilityVerdict verdict)
+    {
+        return new SessionOperationException(
+            DesktopBlockReason.ToErrorCode(verdict),
+            DesktopBlockReason.Describe(verdict),
+            false);
     }
 
     /// <inheritdoc />

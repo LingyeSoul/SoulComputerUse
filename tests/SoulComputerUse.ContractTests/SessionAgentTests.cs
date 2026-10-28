@@ -569,6 +569,124 @@ public sealed class SessionAgentTests
         CollectionAssert.AreEqual(surface.Frame, await client.ScreenshotAsync(CancellationToken.None));
     }
 
+    /// <summary>
+    /// A session whose RDP client is gone is reported as <c>disconnected</c>, and its screenshot is
+    /// refused with <c>E_DISCONNECTED</c> before the surface is touched: there is no operator on that
+    /// desktop and no automatic reconnect, so a frame would be a lie.
+    /// </summary>
+    [TestMethod]
+    public async Task DesktopClientReportsDisconnectedWhenTheSessionHasNoClient()
+    {
+        FakeDesktopSurface surface = new()
+        {
+            Screen = new DesktopScreen(0, 0, 100, 100),
+            Frame = [1],
+        };
+        DesktopSessionClient client = new(
+            surface,
+            SessionId,
+            AuthTier.SystemCredential,
+            GateStrength.Login,
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.Disconnected);
+
+        SessionStatus status = await client.GetStatusAsync(CancellationToken.None);
+
+        Assert.AreEqual("disconnected", status.State);
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => client.ScreenshotAsync(CancellationToken.None));
+        Assert.AreEqual(SessionErrorCode.Disconnected, error.Code);
+        Assert.IsFalse(error.Retryable);
+        Assert.AreEqual(0, surface.CaptureCount, "A session with no client has no surface to capture.");
+    }
+
+    /// <summary>
+    /// A non-interactive session has no desktop surface either, so the screenshot is refused with
+    /// <c>E_BLOCKED</c> instead of letting the GDI call fail outside the contract.
+    /// </summary>
+    [TestMethod]
+    public async Task DesktopClientRefusesAScreenshotWhenTheSessionIsNotInteractive()
+    {
+        FakeDesktopSurface surface = new()
+        {
+            Screen = new DesktopScreen(0, 0, 100, 100),
+            Frame = [1],
+        };
+        DesktopSessionClient client = new(
+            surface,
+            SessionId,
+            AuthTier.SystemCredential,
+            GateStrength.Login,
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.BlockedNonInteractive);
+
+        SessionStatus status = await client.GetStatusAsync(CancellationToken.None);
+
+        Assert.AreEqual("blocked", status.State);
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => client.ScreenshotAsync(CancellationToken.None));
+        Assert.AreEqual(SessionErrorCode.Blocked, error.Code);
+        Assert.IsFalse(error.Retryable);
+        Assert.AreEqual(0, surface.CaptureCount, "A non-interactive session has no surface to capture.");
+    }
+
+    /// <summary>
+    /// A capture that fails while a secure desktop is showing is reported as blocked: the desktop is
+    /// still there, the operator just has to finish the prompt.
+    /// </summary>
+    [TestMethod]
+    public async Task DesktopClientReportsASecureDesktopCaptureFailureAsBlocked()
+    {
+        FakeDesktopSurface surface = new()
+        {
+            Screen = new DesktopScreen(0, 0, 100, 100),
+            CaptureThrows = true,
+        };
+        DesktopSessionClient client = new(
+            surface,
+            SessionId,
+            AuthTier.SystemCredential,
+            GateStrength.Login,
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.BlockedSecureDesktop);
+
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => client.ScreenshotAsync(CancellationToken.None));
+
+        Assert.AreEqual(SessionErrorCode.Blocked, error.Code);
+        Assert.IsFalse(error.Retryable);
+        Assert.AreEqual(1, surface.CaptureCount, "The blocked desktop is still tried once, as section 1.3 requires.");
+    }
+
+    /// <summary>
+    /// A capture that fails on a usable desktop is an agent defect, and the contract only carries an
+    /// enumerated reason: the exception text must never reach the wire.
+    /// </summary>
+    [TestMethod]
+    public async Task DesktopClientReportsAnUnexpectedCaptureFailureAsAnEnumeratedAgentError()
+    {
+        FakeDesktopSurface surface = new()
+        {
+            Screen = new DesktopScreen(0, 0, 100, 100),
+            CaptureThrows = true,
+        };
+        DesktopSessionClient client = new(
+            surface,
+            SessionId,
+            AuthTier.SystemCredential,
+            GateStrength.Login,
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.Usable);
+
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => client.ScreenshotAsync(CancellationToken.None));
+
+        Assert.AreEqual(SessionErrorCode.AgentError, error.Code);
+        Assert.AreEqual("window-gone", error.Message, "The reason must be one of the contract's enumerated codes.");
+        Assert.IsTrue(error.Retryable);
+        Assert.AreEqual(1, surface.CaptureCount);
+    }
+
     [TestMethod]
     public async Task DesktopClientReportsTheOperatorHintItWasGiven()
     {
@@ -682,6 +800,10 @@ public sealed class SessionAgentTests
 
         public byte[] Frame { get; init; } = [];
 
+        public bool CaptureThrows { get; init; }
+
+        public int CaptureCount { get; private set; }
+
         public (int X, int Y)? LastMove { get; private set; }
 
         public (int X, int Y, MouseButton Button, int Count)? LastClick { get; private set; }
@@ -699,6 +821,12 @@ public sealed class SessionAgentTests
 
         public byte[] CapturePng()
         {
+            CaptureCount++;
+            if (CaptureThrows)
+            {
+                throw new InvalidOperationException("The desktop has no readable surface.");
+            }
+
             return Frame;
         }
 

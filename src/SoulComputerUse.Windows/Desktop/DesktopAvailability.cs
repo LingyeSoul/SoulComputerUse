@@ -19,6 +19,30 @@ public enum DesktopAvailabilityVerdict
 
     /// <summary>The session carries no interactive console, so no picture can be captured and no input delivered.</summary>
     BlockedNonInteractive = 3,
+
+    /// <summary>
+    /// The session still exists but no client is attached to it. Windows keeps the desktop in
+    /// memory, so it can still answer a capture and even open its input desktop; nothing that
+    /// happens there reaches an operator, and the contract has no automatic reconnect, so this is
+    /// the terminal <c>disconnected</c> state rather than a blocked one.
+    /// </summary>
+    Disconnected = 4,
+}
+
+/// <summary>The connection state Windows Terminal Services reports for the calling session.</summary>
+public enum DesktopSessionConnectState
+{
+    /// <summary><c>WTSActive</c>: a signed-in user is attached to an interactive session.</summary>
+    Active = 0,
+
+    /// <summary>
+    /// <c>WTSDisconnected</c>: the session is still running but its client is gone. Input and
+    /// capture stay impossible until a new session is started.
+    /// </summary>
+    Disconnected = 1,
+
+    /// <summary>Any other connection state, which this build treats as non-interactive.</summary>
+    Other = 2,
 }
 
 /// <summary>
@@ -42,12 +66,13 @@ public static class DesktopAvailability
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 1. Session state first. A session that is not <c>WTSActive</c>, or that runs on a window
-    /// station other than <c>WinSta0</c>, is not showing anything to anyone, so nothing may be
-    /// captured or typed. This must be the first gate because the later facts can still look
-    /// healthy on such a session: a disconnected session keeps a desktop named <c>Default</c>, and
-    /// opening it can even succeed. Checking names first would therefore call a dead session
-    /// usable.
+    /// 1. Session state first. A session Windows reports as <c>WTSDisconnected</c> is answered as
+    /// <see cref="DesktopAvailabilityVerdict.Disconnected"/>: its desktop can still look healthy and
+    /// even open, but nobody is attached, and the contract has no reconnect. Any other state that is
+    /// not <c>WTSActive</c>, or that runs on a window station other than <c>WinSta0</c>, is not
+    /// showing anything to anyone either, so nothing may be captured or typed. This must be the
+    /// first gate because the later facts can still look healthy on such a session. Checking names
+    /// first would therefore call a dead session usable.
     /// </para>
     /// <para>
     /// 2. Then the input-desktop handle. A refusal to open the input desktop is the observable
@@ -67,15 +92,16 @@ public static class DesktopAvailability
     /// </para>
     /// </remarks>
     /// <param name="inputDesktopOpenSucceeded">True when the input desktop handle was obtained.</param>
-    /// <param name="sessionIsActive">True when Windows Terminal Services reports <c>WTSActive</c>.</param>
+    /// <param name="sessionConnectState">The connection state Windows reports for this session.</param>
     /// <param name="inputDesktopName">
     /// The name read from the opened input desktop, or null when the handle could not be opened.
     /// </param>
     /// <param name="sessionWindowStation">The window station the calling process runs on.</param>
     /// <exception cref="ArgumentException">The window station name is null, empty or whitespace.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The connection state is not defined.</exception>
     public static DesktopAvailabilityVerdict Evaluate(
         bool inputDesktopOpenSucceeded,
-        bool sessionIsActive,
+        DesktopSessionConnectState sessionConnectState,
         string? inputDesktopName,
         string sessionWindowStation)
     {
@@ -86,7 +112,20 @@ public static class DesktopAvailability
                 nameof(sessionWindowStation));
         }
 
-        if (!sessionIsActive
+        if (!Enum.IsDefined(sessionConnectState))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(sessionConnectState),
+                sessionConnectState,
+                "The connection state is not a defined value, so it cannot be classified.");
+        }
+
+        if (sessionConnectState == DesktopSessionConnectState.Disconnected)
+        {
+            return DesktopAvailabilityVerdict.Disconnected;
+        }
+
+        if (sessionConnectState != DesktopSessionConnectState.Active
             || !string.Equals(sessionWindowStation, InteractiveWindowStation, StringComparison.OrdinalIgnoreCase))
         {
             return DesktopAvailabilityVerdict.BlockedNonInteractive;

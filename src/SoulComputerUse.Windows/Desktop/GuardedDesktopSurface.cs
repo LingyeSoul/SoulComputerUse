@@ -6,9 +6,10 @@ namespace SoulComputerUse.Windows.Desktop;
 
 /// <summary>
 /// Decides a tool call against the desktop before it reaches the surface. While the desktop is
-/// locked, protected or non-interactive every input call is refused with <c>E_BLOCKED</c>, and the
-/// inner surface is never reached: a refused call must not leave a keystroke or a click on a UAC
-/// prompt behind.
+/// locked, protected or non-interactive every input call is refused with <c>E_BLOCKED</c>, and a
+/// session whose client is gone is refused with <c>E_DISCONNECTED</c>; the inner surface is never
+/// reached either way, because a refused call must not leave a keystroke or a click on a UAC prompt
+/// behind.
 /// </summary>
 /// <remarks>
 /// <see cref="GetScreen"/> and <see cref="CapturePng"/> are deliberately not guarded. Section 1.3 of

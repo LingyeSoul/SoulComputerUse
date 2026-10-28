@@ -30,7 +30,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             true,
-            true,
+            DesktopSessionConnectState.Active,
             "Default",
             InteractiveStation);
 
@@ -46,11 +46,31 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             true,
-            false,
+            DesktopSessionConnectState.Other,
             "Default",
             InteractiveStation);
 
         Assert.AreEqual(DesktopAvailabilityVerdict.BlockedNonInteractive, verdict);
+    }
+
+    /// <summary>
+    /// A session whose client is gone is reported as disconnected, not blocked: Windows keeps its
+    /// desktop name and even lets it open, so only the connection state separates a dead session from
+    /// a usable one. The contract has no automatic reconnect, which is what makes this terminal.
+    /// </summary>
+    [TestMethod]
+    public void EvaluateReturnsDisconnectedWhenTheSessionHasNoAttachedClient()
+    {
+        DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
+            true,
+            DesktopSessionConnectState.Disconnected,
+            "Default",
+            InteractiveStation);
+
+        Assert.AreEqual(
+            DesktopAvailabilityVerdict.Disconnected,
+            verdict,
+            "A disconnected session can still show a Default desktop; the connection state must decide first.");
     }
 
     /// <summary>A refused input-desktop handle is reported as a locked desktop.</summary>
@@ -59,7 +79,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             false,
-            true,
+            DesktopSessionConnectState.Active,
             null,
             InteractiveStation);
 
@@ -72,7 +92,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             true,
-            true,
+            DesktopSessionConnectState.Active,
             "Winlogon",
             InteractiveStation);
 
@@ -88,7 +108,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             true,
-            true,
+            DesktopSessionConnectState.Active,
             "ScreenSaver",
             InteractiveStation);
 
@@ -104,7 +124,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             false,
-            true,
+            DesktopSessionConnectState.Active,
             "Winlogon",
             InteractiveStation);
 
@@ -123,7 +143,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             false,
-            false,
+            DesktopSessionConnectState.Other,
             null,
             InteractiveStation);
 
@@ -142,7 +162,7 @@ public sealed class DesktopBlockedStateTests
     {
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             true,
-            true,
+            DesktopSessionConnectState.Active,
             "Default",
             "Service-0x0-3e7$");
 
@@ -154,7 +174,7 @@ public sealed class DesktopBlockedStateTests
     public void EvaluateRejectsAnEmptyWindowStationName()
     {
         Assert.ThrowsExactly<ArgumentException>(
-            () => DesktopAvailability.Evaluate(true, true, "Default", string.Empty));
+            () => DesktopAvailability.Evaluate(true, DesktopSessionConnectState.Active, "Default", string.Empty));
     }
 
     /// <summary>Every blocked verdict maps onto one of the caption's blocked causes.</summary>
@@ -175,6 +195,31 @@ public sealed class DesktopBlockedStateTests
     }
 
     /// <summary>
+    /// Only a blocked verdict maps onto <c>E_BLOCKED</c>. A disconnected verdict is the contract's
+    /// terminal state, so it reports <c>E_DISCONNECTED</c> and has no blocked cause.
+    /// </summary>
+    [TestMethod]
+    public void OnlyBlockedVerdictsMapOntoTheBlockedErrorCode()
+    {
+        Assert.AreEqual(
+            SessionErrorCode.Blocked,
+            DesktopBlockReason.ToErrorCode(DesktopAvailabilityVerdict.BlockedLockedDesktop));
+        Assert.AreEqual(
+            SessionErrorCode.Blocked,
+            DesktopBlockReason.ToErrorCode(DesktopAvailabilityVerdict.BlockedSecureDesktop));
+        Assert.AreEqual(
+            SessionErrorCode.Blocked,
+            DesktopBlockReason.ToErrorCode(DesktopAvailabilityVerdict.BlockedNonInteractive));
+        Assert.AreEqual(
+            SessionErrorCode.Disconnected,
+            DesktopBlockReason.ToErrorCode(DesktopAvailabilityVerdict.Disconnected));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(
+            () => DesktopBlockReason.ToErrorCode(DesktopAvailabilityVerdict.Usable));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(
+            () => DesktopBlockReason.ToBlockedCause(DesktopAvailabilityVerdict.Disconnected));
+    }
+
+    /// <summary>
     /// Five input operations are refused with <c>E_BLOCKED</c> while the desktop is blocked, and the
     /// inner surface is never reached.
     /// </summary>
@@ -182,7 +227,7 @@ public sealed class DesktopBlockedStateTests
     public void GuardedSurfaceRefusesEveryInputOperationWhileBlocked()
     {
         RecordingDesktopSurface inner = new();
-        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, false, null));
         GuardedDesktopSurface surface = new(inner, guard);
 
         Action[] operations =
@@ -212,6 +257,32 @@ public sealed class DesktopBlockedStateTests
     }
 
     /// <summary>
+    /// Input on a session whose client is gone is refused with <c>E_DISCONNECTED</c>: the guard must
+    /// not report a terminal session as the blocked state, which the contract lets the operator
+    /// recover by acting at the machine.
+    /// </summary>
+    [TestMethod]
+    public void GuardedSurfaceReportsTheDisconnectedCodeWhenTheSessionHasNoClient()
+    {
+        RecordingDesktopSurface inner = new();
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(
+            DesktopSessionConnectState.Disconnected,
+            InteractiveStation,
+            true,
+            "Default"));
+        GuardedDesktopSurface surface = new(inner, guard);
+
+        SessionOperationException error = Assert.ThrowsExactly<SessionOperationException>(
+            () => surface.MovePointer(1, 1),
+            "A session with no attached client must refuse input.");
+
+        Assert.AreEqual(SessionErrorCode.Disconnected, error.Code);
+        Assert.AreEqual("E_DISCONNECTED", SessionErrorCodeNames.ToWireName(error.Code));
+        Assert.IsFalse(error.Retryable);
+        Assert.AreEqual(0, inner.CallCount, "A refused call must never reach the inner surface.");
+    }
+
+    /// <summary>
     /// The screenshot stays available while blocked: section 1.3 keeps the read-only tools working so
     /// the operator can judge the prompt from the frame.
     /// </summary>
@@ -219,7 +290,7 @@ public sealed class DesktopBlockedStateTests
     public void GuardedSurfaceStillCapturesWhileBlocked()
     {
         RecordingDesktopSurface inner = new();
-        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, false, null));
         GuardedDesktopSurface surface = new(inner, guard);
 
         byte[] frame = surface.CapturePng();
@@ -236,7 +307,7 @@ public sealed class DesktopBlockedStateTests
     public void GuardedSurfaceForwardsEveryOperationWhileUsable()
     {
         RecordingDesktopSurface inner = new();
-        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, true, "Default"));
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, true, "Default"));
         GuardedDesktopSurface surface = new(inner, guard);
         SessionKey[] keys = [SessionKey.Ctrl, SessionKey.Esc];
 
@@ -269,7 +340,7 @@ public sealed class DesktopBlockedStateTests
     public void GetScreenIsAvailableWhileBlocked()
     {
         RecordingDesktopSurface inner = new() { Screen = new DesktopScreen(0, 0, 1280, 720) };
-        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
+        BlockedGuard guard = BlockedGuardFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, false, null));
         GuardedDesktopSurface surface = new(inner, guard);
 
         DesktopScreen screen = surface.GetScreen();
@@ -293,8 +364,8 @@ public sealed class DesktopBlockedStateTests
             {
                 probes++;
                 return probes == 1
-                    ? new DesktopBlockObservation(true, InteractiveStation, false, null)
-                    : new DesktopBlockObservation(true, InteractiveStation, true, "Default");
+                    ? new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, false, null)
+                    : new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, true, "Default");
             });
         GuardedDesktopSurface surface = new(inner, guard);
 
@@ -317,7 +388,7 @@ public sealed class DesktopBlockedStateTests
 
         DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
             observation.InputDesktopOpenSucceeded,
-            observation.SessionIsActive,
+            observation.SessionConnectState,
             observation.InputDesktopName,
             observation.SessionWindowStation);
 
@@ -376,9 +447,9 @@ public sealed class DesktopBlockedStateTests
     [TestMethod]
     public void BlockedMessagesDistinguishTheThreeCauses()
     {
-        string locked = BlockedMessageFor(new DesktopBlockObservation(true, InteractiveStation, false, null));
-        string secure = BlockedMessageFor(new DesktopBlockObservation(true, InteractiveStation, true, "Winlogon"));
-        string nonInteractive = BlockedMessageFor(new DesktopBlockObservation(false, InteractiveStation, true, "Default"));
+        string locked = BlockedMessageFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, false, null));
+        string secure = BlockedMessageFor(new DesktopBlockObservation(DesktopSessionConnectState.Active, InteractiveStation, true, "Winlogon"));
+        string nonInteractive = BlockedMessageFor(new DesktopBlockObservation(DesktopSessionConnectState.Other, InteractiveStation, true, "Default"));
 
         Assert.AreNotEqual(locked, secure, false, "A locked desktop and a secure desktop must be told apart.");
         Assert.AreNotEqual(locked, nonInteractive, false, "A locked desktop and a non-interactive session must be told apart.");

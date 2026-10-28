@@ -5,12 +5,12 @@ using System.Runtime.InteropServices;
 namespace SoulComputerUse.Windows.Desktop;
 
 /// <summary>One observation of the calling session's desktop, as the blocked guard consumes it.</summary>
-/// <param name="SessionIsActive">True when Windows Terminal Services reports the session as <c>WTSActive</c>.</param>
+/// <param name="SessionConnectState">The connection state Windows Terminal Services reports for this session.</param>
 /// <param name="SessionWindowStation">The window station the calling process runs on.</param>
 /// <param name="InputDesktopOpenSucceeded">True when the input desktop handle could be obtained.</param>
 /// <param name="InputDesktopName">The name read from the opened input desktop, or null when it was never opened.</param>
 public sealed record DesktopBlockObservation(
-    bool SessionIsActive,
+    DesktopSessionConnectState SessionConnectState,
     string SessionWindowStation,
     bool InputDesktopOpenSucceeded,
     string? InputDesktopName);
@@ -34,7 +34,7 @@ public static class DesktopBlockProbe
     /// <exception cref="InvalidOperationException">A query succeeded but returned no usable name.</exception>
     public static DesktopBlockObservation Probe()
     {
-        bool sessionIsActive = ReadSessionIsActive();
+        DesktopSessionConnectState sessionConnectState = ReadSessionConnectState();
         string sessionWindowStation = ReadWindowStationName();
 
         nint inputDesktop = DesktopBlockNative.OpenInputDesktop(
@@ -47,7 +47,7 @@ public static class DesktopBlockProbe
             // A locked or protected desktop belongs to another logon session, so opening it is
             // refused. This is the expected answer, not a probe failure, so it is reported as data
             // and the classification turns it into the locked-desktop verdict.
-            return new DesktopBlockObservation(sessionIsActive, sessionWindowStation, false, null);
+            return new DesktopBlockObservation(sessionConnectState, sessionWindowStation, false, null);
         }
 
         bool closed;
@@ -71,10 +71,10 @@ public static class DesktopBlockProbe
             throw Failure("CloseDesktop(input desktop)", Marshal.GetLastWin32Error());
         }
 
-        return new DesktopBlockObservation(sessionIsActive, sessionWindowStation, true, inputDesktopName);
+        return new DesktopBlockObservation(sessionConnectState, sessionWindowStation, true, inputDesktopName);
     }
 
-    private static bool ReadSessionIsActive()
+    private static DesktopSessionConnectState ReadSessionConnectState()
     {
         nint buffer = 0;
         try
@@ -101,7 +101,12 @@ public static class DesktopBlockProbe
 
             // WTS_CONNECTSTATE_CLASS is an INT-backed enumeration, so the buffer holds one 32-bit value.
             int connectState = Marshal.ReadInt32(buffer);
-            return connectState == DesktopBlockNative.WtsConnectStateActive;
+            return connectState switch
+            {
+                DesktopBlockNative.WtsConnectStateActive => DesktopSessionConnectState.Active,
+                DesktopBlockNative.WtsConnectStateDisconnected => DesktopSessionConnectState.Disconnected,
+                _ => DesktopSessionConnectState.Other,
+            };
         }
         finally
         {

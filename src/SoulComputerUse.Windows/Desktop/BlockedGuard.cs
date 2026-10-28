@@ -18,8 +18,9 @@ public static class DesktopBlockReason
 {
     /// <summary>Returns the cause the blocked state reports for one verdict.</summary>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// The verdict is <see cref="DesktopAvailabilityVerdict.Usable"/> or not defined, neither of which
-    /// can be a blocked cause.
+    /// The verdict is <see cref="DesktopAvailabilityVerdict.Usable"/>,
+    /// <see cref="DesktopAvailabilityVerdict.Disconnected"/> or not defined; none of them can be a
+    /// blocked cause.
     /// </exception>
     public static BlockedCause ToBlockedCause(DesktopAvailabilityVerdict verdict)
     {
@@ -31,7 +32,30 @@ public static class DesktopBlockReason
             _ => throw new ArgumentOutOfRangeException(
                 nameof(verdict),
                 verdict,
-                "Only a blocked verdict has a cause; a usable desktop and an unknown value do not."),
+                "Only a blocked verdict has a cause; a usable or disconnected desktop and an unknown value do not."),
+        };
+    }
+
+    /// <summary>
+    /// Returns the contract error code one refused verdict reports. The disconnected verdict is the
+    /// contract's terminal state, not a blocked one, because nothing can restore a client that is
+    /// gone.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The verdict is <see cref="DesktopAvailabilityVerdict.Usable"/> or not defined.
+    /// </exception>
+    public static SessionErrorCode ToErrorCode(DesktopAvailabilityVerdict verdict)
+    {
+        return verdict switch
+        {
+            DesktopAvailabilityVerdict.Disconnected => SessionErrorCode.Disconnected,
+            DesktopAvailabilityVerdict.BlockedLockedDesktop => SessionErrorCode.Blocked,
+            DesktopAvailabilityVerdict.BlockedSecureDesktop => SessionErrorCode.Blocked,
+            DesktopAvailabilityVerdict.BlockedNonInteractive => SessionErrorCode.Blocked,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(verdict),
+                verdict,
+                "Only a refused verdict has an error code; a usable desktop and an unknown value do not."),
         };
     }
 
@@ -53,10 +77,12 @@ public static class DesktopBlockReason
                 "A protected desktop such as a UAC prompt is showing, so the tool call was refused. Complete the prompt on the session's own desktop and retry.",
             DesktopAvailabilityVerdict.BlockedNonInteractive =>
                 "The session is not interactive, so the tool call was refused. Connect to the session and retry.",
+            DesktopAvailabilityVerdict.Disconnected =>
+                "The session has no attached client, so the tool call was refused. Start a new session; this one does not reconnect automatically.",
             _ => throw new ArgumentOutOfRangeException(
                 nameof(verdict),
                 verdict,
-                "Only a blocked verdict has a message; a usable desktop and an unknown value do not."),
+                "Only a refused verdict has a message; a usable desktop and an unknown value do not."),
         };
     }
 }
@@ -97,7 +123,7 @@ public sealed class BlockedGuard
         DesktopBlockObservation observation = _probe();
         return DesktopAvailability.Evaluate(
             observation.InputDesktopOpenSucceeded,
-            observation.SessionIsActive,
+            observation.SessionConnectState,
             observation.InputDesktopName,
             observation.SessionWindowStation);
     }
@@ -106,8 +132,9 @@ public sealed class BlockedGuard
     /// Probes the desktop and throws when it cannot accept a tool call.
     /// </summary>
     /// <exception cref="SessionOperationException">
-    /// The desktop is locked, protected or non-interactive. The code is
-    /// <see cref="SessionErrorCode.Blocked"/> and the call is not retryable until the operator acts.
+    /// The desktop is locked, protected or non-interactive (<see cref="SessionErrorCode.Blocked"/>),
+    /// or the session has no attached client (<see cref="SessionErrorCode.Disconnected"/>). Neither is
+    /// retryable until the operator acts.
     /// </exception>
     public void EnsureUsable()
     {
@@ -119,7 +146,7 @@ public sealed class BlockedGuard
         }
 
         throw new SessionOperationException(
-            SessionErrorCode.Blocked,
+            DesktopBlockReason.ToErrorCode(verdict),
             DesktopBlockReason.Describe(verdict),
             false);
     }

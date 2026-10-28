@@ -17,6 +17,12 @@ internal static class DesktopBlockNative
     /// <summary>The <c>WTS_CONNECTSTATE_CLASS</c> value of <c>WTSActive</c>, a signed-in attached user.</summary>
     internal const int WtsConnectStateActive = 0;
 
+    /// <summary>
+    /// The <c>WTS_CONNECTSTATE_CLASS</c> value of <c>WTSDisconnected</c>: the session still exists,
+    /// but its client is gone and nothing it renders reaches an operator.
+    /// </summary>
+    internal const int WtsConnectStateDisconnected = 4;
+
     /// <summary>The <c>DESKTOP_READOBJECTS</c> access right.</summary>
     internal const uint DesktopReadObjects = 0x0001;
 
