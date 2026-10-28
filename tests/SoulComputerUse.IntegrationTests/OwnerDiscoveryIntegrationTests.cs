@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
@@ -14,25 +15,32 @@ namespace SoulComputerUse.IntegrationTests;
 /// the real 300 ms probe.
 /// </summary>
 /// <remarks>
-/// Every case uses a per-run lock name of the form <c>Global\SoulComputerUse-Test-{guid}</c> and a
-/// per-run pipe name of the form <c>SoulComputerUse.owner.test-{guid}</c>, so the contract-pinned
-/// production lock and the production owner pipe are never touched. Each case disposes the lock and
-/// the pipe it created; no files are written, so there is no temporary directory to remove.
+/// Every case uses a per-run lock name of the form <c>Global\SoulComputerUse-Test-{guid}</c>, a
+/// per-run pipe name of the form <c>SoulComputerUse.owner.test-{guid}</c> and a per-run ownership
+/// store rooted in a temporary directory, so the contract-pinned production lock, the production
+/// owner pipe and the account's real ownership record are never touched. Each case disposes the lock
+/// and the pipe it created and removes the temporary store root again.
 /// </remarks>
 [TestClass]
 [DoNotParallelize]
 public sealed class OwnerDiscoveryIntegrationTests
 {
+    private const string TestSid = "S-1-5-21-0000000000-0000000000-0000000000-1001";
+
     private static readonly TimeSpan CaseTimeout = TimeSpan.FromSeconds(30);
 
     private string _lockName = string.Empty;
     private string _pipeName = string.Empty;
+    private string _root = string.Empty;
+    private SessionOwnerStore _store = null!;
 
     [TestInitialize]
     public void CreateIsolatedNames()
     {
         _lockName = @"Global\SoulComputerUse-Test-" + Guid.NewGuid().ToString("N");
         _pipeName = "SoulComputerUse.owner.test-" + Guid.NewGuid().ToString("N");
+        _root = Path.Combine(Path.GetTempPath(), "scu-owner-discovery-" + Guid.NewGuid().ToString("N"));
+        _store = new SessionOwnerStore(_root, TestSid);
     }
 
     [TestCleanup]
@@ -41,12 +49,17 @@ public sealed class OwnerDiscoveryIntegrationTests
         Assert.IsFalse(
             SingleInstanceLock.IsHeldByAnyone(_lockName),
             "The case's own lock object must be gone afterwards, otherwise the case leaked a holder.");
+
+        if (Directory.Exists(_root))
+        {
+            Directory.Delete(_root, recursive: true);
+        }
     }
 
     [TestMethod]
     public void TheProbeSeesARealLockAndStopsSeeingItAfterRelease()
     {
-        OwnerProbe probe = new(_lockName, _pipeName);
+        OwnerProbe probe = new(_lockName, _pipeName, _store);
 
         Assert.IsFalse(
             probe.LockExists(),
@@ -70,7 +83,7 @@ public sealed class OwnerDiscoveryIntegrationTests
     [TestMethod]
     public async Task TheProbeConnectsToARealOwnerPipeWithinTheTimeout()
     {
-        OwnerProbe probe = new(_lockName, _pipeName);
+        OwnerProbe probe = new(_lockName, _pipeName, _store);
 
         bool beforeServer = await probe.IsOwnerPipeReachableAsync(CancellationToken.None).WaitAsync(CaseTimeout);
         Assert.IsFalse(beforeServer, "With no server listening the probe must report the pipe as unreachable.");
@@ -105,7 +118,7 @@ public sealed class OwnerDiscoveryIntegrationTests
         Task acceptLoop = server.RunAsync(serverLifetime.Token);
 
         OwnerSessionResolver resolver = new(
-            new OwnerProbe(_lockName, _pipeName),
+            new OwnerProbe(_lockName, _pipeName, _store),
             () => new NamedPipeSessionClient(_pipeName),
             null);
 
@@ -132,7 +145,7 @@ public sealed class OwnerDiscoveryIntegrationTests
 
         RecordingSessionStarter starter = new();
         OwnerSessionResolver resolver = new(
-            new OwnerProbe(_lockName, _pipeName),
+            new OwnerProbe(_lockName, _pipeName, _store),
             () => new NamedPipeSessionClient(_pipeName),
             starter);
 
@@ -151,7 +164,7 @@ public sealed class OwnerDiscoveryIntegrationTests
     public async Task AFreeLockWithoutAStarterFailsWithNotReady()
     {
         OwnerSessionResolver resolver = new(
-            new OwnerProbe(_lockName, _pipeName),
+            new OwnerProbe(_lockName, _pipeName, _store),
             () => new NamedPipeSessionClient(_pipeName),
             null);
 

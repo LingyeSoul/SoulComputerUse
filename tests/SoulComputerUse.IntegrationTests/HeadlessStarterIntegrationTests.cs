@@ -180,8 +180,13 @@ public sealed class HeadlessStarterIntegrationTests
         Assert.IsTrue(again.IsHeld, "The released lock must be acquirable again.");
     }
 
+    /// <summary>
+    /// The first owner really holds the lock and its record names a live process that is still in the
+    /// starting state, so a second start on a silent pipe must be refused with the retryable
+    /// <c>E_NOT_READY</c> instead of starting a second owner or touching the running owner's record.
+    /// </summary>
     [TestMethod]
-    public async Task ASecondStartOnAHeldLockFailsWithLockHeldInsteadOfStartingASecondOwner()
+    public async Task ASecondStartOnAHeldLockOwnedByALiveStartingProcessFailsWithNotReadyInsteadOfStartingASecondOwner()
     {
         RecordingSessionClient backend = new(_sessionId);
         HeadlessOwnerStarter starter = CreateStarter(() => backend);
@@ -196,13 +201,20 @@ public sealed class HeadlessStarterIntegrationTests
                 _store,
                 static client => new SessionClientToolHandler(client),
                 () => new RecordingSessionClient(_sessionId)),
-            new OwnerProbe(_lockName, secondPipeName));
+            new OwnerProbe(_lockName, secondPipeName, _store));
 
         SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
             () => second.StartAsync(CancellationToken.None).WaitAsync(CaseTimeout));
 
-        Assert.AreEqual(SessionErrorCode.LockHeld, error.Code);
-        Assert.IsFalse(error.Retryable);
+        Assert.AreEqual(
+            SessionErrorCode.NotReady,
+            error.Code,
+            "A held lock whose per-run record names the live first owner in its starting state is the retryable case, not a stale lock.");
+        Assert.IsTrue(error.Retryable);
+        Assert.AreEqual(
+            OwnerSessionResolver.StartInProgressMessage,
+            error.Message,
+            "The starting-owner refusal must use the one shared fixed template.");
         SessionOwnerRecord? record = _store.Read();
         Assert.IsNotNull(record);
         Assert.AreEqual(
@@ -221,7 +233,7 @@ public sealed class HeadlessStarterIntegrationTests
                 _store,
                 static client => new SessionClientToolHandler(client),
                 clientFactory),
-            new OwnerProbe(_lockName, _pipeName));
+            new OwnerProbe(_lockName, _pipeName, _store));
     }
 
     private static void AssertPipeRefusesConnection(string pipeName)
