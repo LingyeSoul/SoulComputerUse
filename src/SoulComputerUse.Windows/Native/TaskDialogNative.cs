@@ -23,7 +23,12 @@ internal static class TaskDialogNative
     /// as this value rather than as a handle, which is the form <c>pszMainIcon</c> accepts when
     /// <c>TDF_USE_HICON_MAIN</c> is not set.
     /// </summary>
-    internal const nint WarningIcon = -1;
+    /// <remarks>
+    /// <c>MAKEINTRESOURCEW(-1)</c> keeps only the low word, so on 64-bit the value is 0xFFFF rather
+    /// than -1. A sign-extended -1 is a pointer to the top of the address space, not a resource id,
+    /// and comctl32 faults with 0xC0000005 while it loads the icon.
+    /// </remarks>
+    internal const nint WarningIcon = 0xFFFF;
 
     [DllImport("comctl32.dll", EntryPoint = "TaskDialogIndirect", CharSet = CharSet.Unicode)]
     internal static extern int TaskDialogIndirect(
