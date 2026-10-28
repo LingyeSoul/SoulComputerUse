@@ -28,9 +28,9 @@ Pick the newest published build:
 
 | Asset | URL |
 |---|---|
-| Release page | `https://github.com/<owner>/SoulComputerUse/releases/latest` |
-| Application archive (stable asset name) | `https://github.com/<owner>/SoulComputerUse/releases/latest/download/SoulComputerUse-win-x64.zip` |
-| Skill archive (stable asset name) | `https://github.com/<owner>/SoulComputerUse/releases/latest/download/soul-computer-use-skill.zip` |
+| Release page | `https://github.com/LingyeSoul/SoulComputerUse/releases/latest` |
+| Application archive (stable asset name) | `https://github.com/LingyeSoul/SoulComputerUse/releases/latest/download/SoulComputerUse-win-x64.zip` |
+| Skill archive (stable asset name) | `https://github.com/LingyeSoul/SoulComputerUse/releases/latest/download/soul-computer-use-skill.zip` |
 | Newest `main` build | the `SoulComputerUse-win-x64-ci` artifact on a CI workflow run |
 
 From the release page, take these two assets:
@@ -41,7 +41,7 @@ From the release page, take these two assets:
 With the GitHub CLI:
 
 ```powershell
-gh release download --repo <owner>/SoulComputerUse `
+gh release download --repo LingyeSoul/SoulComputerUse `
   --pattern "SoulComputerUse-win-x64.zip" `
   --pattern "SHA256SUMS.txt" `
   --dir "$env:USERPROFILE\Downloads\SoulComputerUse"

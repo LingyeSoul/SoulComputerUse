@@ -10,7 +10,7 @@ SHA256SUMS.txt, verifies the archive hash, expands it into the destination, unbl
 files, and runs the CLI self-check. It never edits PATH, the registry, or an agent config.
 
 .PARAMETER Repository
-GitHub repository in owner/name form, for example "example/SoulComputerUse".
+GitHub repository in owner/name form, for example "LingyeSoul/SoulComputerUse".
 
 .PARAMETER Version
 "latest" or a release tag such as "v1.2.3". A bare "1.2.3" is normalized to "v1.2.3".
@@ -19,7 +19,7 @@ GitHub repository in owner/name form, for example "example/SoulComputerUse".
 Empty or nonexistent directory that receives the application files.
 
 .EXAMPLE
-pwsh -NoProfile -File .\scripts\install.ps1 -Repository example/SoulComputerUse -Version latest -Destination "$env:LOCALAPPDATA\SoulComputerUse\app"
+pwsh -NoProfile -File .\scripts\install.ps1 -Repository LingyeSoul/SoulComputerUse -Version latest -Destination "$env:LOCALAPPDATA\SoulComputerUse\app"
 #>
 [CmdletBinding()]
 param(

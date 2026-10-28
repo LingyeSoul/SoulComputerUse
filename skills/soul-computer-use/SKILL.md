@@ -30,7 +30,7 @@ If it is missing, install the latest release with the script in this skill's `sc
 
 ```powershell
 pwsh -NoProfile -File <skill-dir>\scripts\install.ps1 `
-  -Repository <owner>/SoulComputerUse `
+  -Repository LingyeSoul/SoulComputerUse `
   -Version latest `
   -Destination $InstallRoot
 ```

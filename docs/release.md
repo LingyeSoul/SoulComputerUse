@@ -33,7 +33,7 @@
 | 文件 | 用途 |
 |---|---|
 | `SoulComputerUse-win-x64.zip` | self-contained 应用；解压后直接运行，不需要 .NET 运行时。版本由 Release 标签标识，资产名保持稳定，便于 `releases/latest/download` 直链 |
-| `soul-computer-use-skill.zip` | `npx skills add <url>` 可直接安装的 skill 包，根目录含 `SKILL.md` |
+| `soul-computer-use-skill.zip` | `npx skills add https://github.com/LingyeSoul/SoulComputerUse/releases/latest/download/soul-computer-use-skill.zip` 可直接安装的 skill 包，根目录含 `SKILL.md` |
 | `SHA256SUMS.txt` | 两个压缩包的 SHA-256，安装脚本会强制校验 |
 
 应用压缩包内必须同时存在：

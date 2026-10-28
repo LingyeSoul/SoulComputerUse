@@ -27,13 +27,13 @@
 
 ### 方式一：下载 Release（推荐）
 
-把下文的 `<owner>` 换成仓库实际所有者（例如 `your-org/SoulComputerUse`）。在仓库的 **Releases** 页面下载：
+在仓库的 [Releases](https://github.com/LingyeSoul/SoulComputerUse/releases) 页面下载：
 
 - `SoulComputerUse-win-x64.zip`
 - `SHA256SUMS.txt`
 
 ```powershell
-gh release download --repo <owner>/SoulComputerUse `
+gh release download --repo LingyeSoul/SoulComputerUse `
   --pattern "SoulComputerUse-win-x64.zip" `
   --pattern "SHA256SUMS.txt" `
   --dir "$env:USERPROFILE\Downloads\SoulComputerUse"
@@ -45,16 +45,16 @@ gh release download --repo <owner>/SoulComputerUse `
 
 ### 方式二：让 agent 安装
 
-先安装 skill（`<owner>` 换成仓库实际所有者）：
+先安装 skill：
 
 ```powershell
-npx skills add <owner>/SoulComputerUse --skill soul-computer-use -g -y
+npx skills add LingyeSoul/SoulComputerUse --skill soul-computer-use -g -y
 ```
 
 也可以直接从 Release 的 skill 压缩包安装：
 
 ```powershell
-npx skills add https://github.com/<owner>/SoulComputerUse/releases/latest/download/soul-computer-use-skill.zip -g -y
+npx skills add https://github.com/LingyeSoul/SoulComputerUse/releases/latest/download/soul-computer-use-skill.zip -g -y
 ```
 
 然后对 agent 说：
