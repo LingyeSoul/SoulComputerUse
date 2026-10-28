@@ -75,7 +75,7 @@
 | `E_COORD_OUT_OF_RANGE` | 坐标超出子会话屏幕边界（message 含边界值） | false | ready/blocked |
 | `E_SCREENSHOT_TOO_LARGE` | 截图编码后超过大小上限 | false | ready/blocked |
 | `E_AGENT_ERROR` | 子会话执行动作失败（透传脱敏原因） | true | ready |
-| `E_HOST_LAUNCH_FAILED` | 宿主进程未能从调用方环境中拉起（安装目录缺宿主可执行文件、调用方不在交互控制台会话、调用方已提权、进程创建失败、或宿主在取得锁之前退出） | false | starting |
+| `E_HOST_LAUNCH_FAILED` | 宿主进程未能从调用方环境中拉起（安装目录缺宿主可执行文件、调用方不在交互控制台会话、调用方已提权、进程创建失败、宿主在取得锁之前退出、或宿主在等待时限内未取得锁） | false | starting |
 
 `message` 规则：只含固定模板 + 参数化的数值/枚举（坐标、边界、状态名、原因码），不得含 §10 黑名单字段。`E_AGENT_ERROR` 的原因**只允许枚举原因码**（如 `uac-shield`、`window-gone`、`input-rejected`），代理不得发送自由文本原因。
 

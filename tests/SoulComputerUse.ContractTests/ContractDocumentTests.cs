@@ -14,7 +14,7 @@ public sealed class ContractDocumentTests
 {
     /// <summary>The section 2 row that publishes the launch failure code, as the document states it.</summary>
     private const string LaunchFailureRow =
-        "| `E_HOST_LAUNCH_FAILED` | 宿主进程未能从调用方环境中拉起（安装目录缺宿主可执行文件、调用方不在交互控制台会话、调用方已提权、进程创建失败、或宿主在取得锁之前退出） | false | starting |";
+        "| `E_HOST_LAUNCH_FAILED` | 宿主进程未能从调用方环境中拉起（安装目录缺宿主可执行文件、调用方不在交互控制台会话、调用方已提权、进程创建失败、宿主在取得锁之前退出、或宿主在等待时限内未取得锁） | false | starting |";
 
     [TestMethod]
     public void TheContractPublishesTheStartSurfaceAndTheLaunchFailureCode()
@@ -23,6 +23,10 @@ public sealed class ContractDocumentTests
 
         Assert.Contains("v2.8", contract, "The contract must carry the version marker that lands the start surface.");
         Assert.Contains(LaunchFailureRow, contract, "The launch failure code must be published as a section 2 row.");
+        Assert.Contains(
+            "或宿主在等待时限内未取得锁",
+            contract,
+            "The row must name the bounded-wait timeout, the sixth cause HostProcessLauncher raises the code for.");
         Assert.Contains("E_NOT_READY", contract, "The retryable answer for a starting owner must stay published.");
         Assert.Contains("### 5.8 `start_session`", contract, "The adapter-local start tool needs its own section 5 entry.");
         Assert.Contains("| `start` | `start_session` | 无 |", contract, "The CLI command table must map start to start_session.");

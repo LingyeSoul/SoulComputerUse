@@ -20,6 +20,6 @@ internal static class CliHelp
           --help
         Run without arguments to open the interactive prompt (scu>). A command given on the
         command line runs once and exits. quit exits the prompt without closing the session.
-        start is local: it opens the product window and waits for the operator to log on there.
+        start is local: it opens the product window, and the operator logs on in that window.
         """;
 }
