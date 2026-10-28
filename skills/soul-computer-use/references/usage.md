@@ -6,7 +6,7 @@ The authoritative wire contract is the repository's `docs/interface-contract.md`
 
 | State | Meaning | What the agent does |
 |---|---|---|
-| `starting` | Process is taking the lock and probing the machine. | Wait. |
+| `starting` | Process is taking the lock and probing the machine; the operator's logon wait happens in this phase, before the owner pipe exists. | Call `scu start` / `start_session` if no window is open; calls answer `E_NOT_READY` (retryable). Wait and poll. |
 | `awaiting-credentials` | The product window is showing the Windows login screen. | Stop; the human logs in. Never type credentials. |
 | `connecting` | Login finished; the child-session agent handshake is in progress. | Wait. |
 | `ready` | Tools are available. | Operate. |
@@ -29,6 +29,7 @@ All tools take JSON objects with `additionalProperties: false`. Unknown fields a
 | `mouse_scroll` | `x`, `y`, `deltaX`, `deltaY` | `{ok:true}` |
 | `key_type` | `text` (at most 1000 characters) | `{ok:true}`; the text is never logged |
 | `key_press` | `keys` (1–5 of `enter`, `esc`, `tab`, `delete`, `backspace`, `home`, `end`, `up`, `down`, `left`, `right`, `win`, `ctrl`, `alt`, `shift`) | `{ok:true}` |
+| `start_session` | none | `{ok:true}` as soon as the host takes the machine lock; it does not wait for logon or read a session — the operator logs on in the product window. Idempotent when a session already exists. |
 
 ## CLI
 
@@ -43,10 +44,13 @@ All tools take JSON objects with `additionalProperties: false`. Unknown fields a
 | `scroll <x> <y> <dx> <dy>` | Scroll at a point. |
 | `type <text>` | Type text. In the prompt, everything after `type ` is kept verbatim. |
 | `key <k1>+<k2>` | Press a key combination, for example `ctrl+s` or `ctrl+alt+delete`. |
+| `start` | Open the product window on a new session; prints `ok` once the host takes the lock, before the operator logs on. Idempotent when a session exists. |
 | `quit` | Leave the prompt. It does not close the session. |
 | `--help` | Print the command table. |
 
 Output is structured: `ok`, `ok <path>`, a status line, or `<CODE> <message>` on stderr with exit code `1`.
+
+The interactive prompt holds one session for its lifetime: `start` is idempotent and never rebinds a session that has gone away. After a disconnect, exit and run `scu` again.
 
 ## Coordinates
 
@@ -72,7 +76,7 @@ Read the screen size again after the session restarts, the display changes, or `
 | `E_CHILD_CONNECTIONS_DENIED` | `fDenyChildConnections` is missing or non-zero. | Set it to DWORD 0. |
 | `E_RDP_INBOUND_DENIED` | `fDenyTSConnections` is missing or non-zero. | Set it to DWORD 0. |
 | `E_STATE` | The current state rejects this operation. | Re-read `status`; do not force it. |
-| `E_NOT_READY` | No owner, or the session is starting/connecting. | Start the host or wait. |
+| `E_NOT_READY` | No session owner is running, or the owner is starting or waiting for the operator's logon. Retryable. | Call `scu start` / `start_session` first if no window is open, then poll `status`. During the logon wait keep polling: this is the normal answer, not an error. |
 | `E_AWAITING_CREDENTIALS` | The human has not finished the Windows login. | Wait; never type credentials. |
 | `E_DISCONNECTED` | The session is gone and will not reconnect. | Restart the host. |
 | `E_BLOCKED` | Secure desktop or non-interactive session. | Stop; human finishes the prompt. |
@@ -85,15 +89,17 @@ Read the screen size again after the session restarts, the display changes, or `
 | `E_COORD_OUT_OF_RANGE` | The point is outside the child desktop. | Re-read `screen` and retry within bounds. |
 | `E_SCREENSHOT_TOO_LARGE` | The encoded PNG exceeded 5 MiB. | Report it; do not raise the limit ad hoc. |
 | `E_AGENT_ERROR` | The child-session action failed. | Read the enumerated reason (`uac-shield`, `window-gone`, `input-rejected`) and stop on security reasons. |
+| `E_HOST_LAUNCH_FAILED` | The host could not be launched from the caller's environment: missing host executable, elevated caller, caller off the interactive console session, refused process creation, host exited before taking the lock, or the wait limit. Not retryable. | Read the message, fix the named cause, and only then retry. An elevated agent needs the human to run `scu start` from a normal-privilege terminal. |
 
 ## Operating loop
 
-1. Read `get_status` or `scu status`.
-2. If not `ready`, follow the state table; do not send input.
-3. Take a screenshot before a non-trivial interaction and use it to choose coordinates.
-4. Act with one tool at a time. Re-read `status` after a failure.
-5. Stop on `blocked`, `awaiting-credentials`, `disconnected`, or any security-related `E_AGENT_ERROR`.
-6. Close through the product window. Killing the host skips child-session logoff and switch restoration.
+1. If no product window is open, call `scu start` / `start_session` first; `E_NOT_READY` here is retryable (the session is starting or waiting for the operator's logon).
+2. Read `get_status` or `scu status`.
+3. If not `ready`, follow the state table; do not send input.
+4. Take a screenshot before a non-trivial interaction and use it to choose coordinates.
+5. Act with one tool at a time. Re-read `status` after a failure.
+6. Stop on `blocked`, `awaiting-credentials`, `disconnected`, or any security-related `E_AGENT_ERROR`.
+7. Close through the product window. Killing the host skips child-session logoff and switch restoration.
 
 ## Security boundaries
 

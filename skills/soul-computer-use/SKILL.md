@@ -41,7 +41,7 @@ If the release is unavailable, use `references/install.md` for the manual downlo
 
 ## 2. Register the MCP server (optional)
 
-The MCP server is a stdio process and a *client* of the session owner. It does not open the GUI session by itself.
+The MCP server is a stdio process and a *client* of the session owner. It stays alive without a session, and opens the product window only when the agent calls `start_session`.
 
 Register this command with the agent client:
 
@@ -77,13 +77,15 @@ See `references/install.md` for the full registration and smoke-test sequence.
 
 ## 3. Start a session
 
-Start the GUI host, then let the human complete the Windows login:
+Start the session through the product first:
 
 ```powershell
-Start-Process -FilePath (Join-Path $InstallRoot 'SoulComputerUse.Host.exe') -ArgumentList '--new-session'
+& (Join-Path $InstallRoot 'SoulComputerUse.Cli.exe') start
 ```
 
-Wait for the user to finish logging in, then poll:
+With the MCP server registered, call the `start_session` tool instead; it performs the same product action as `scu start`.
+
+`start` prints `ok` as soon as the host takes the machine lock. It does **not** wait for logon. The human completes the Windows login by hand in the product window; never type anything into it. Then poll:
 
 ```powershell
 & (Join-Path $InstallRoot 'SoulComputerUse.Cli.exe') status
@@ -95,7 +97,11 @@ Wait for the user to finish logging in, then poll:
 - `state=blocked`: stop; a UAC/secure-desktop prompt needs the human.
 - `state=disconnected`: stop; the user must close and restart the host.
 
-If `status` prints `E_NOT_READY`, no owner answered. If the product window is already open, wait: the session is still `starting` or `connecting`. Otherwise start the host first; do not enable the headless starter path in this build.
+While the host is starting and while the human logs on, every session call answers `E_NOT_READY` with `retryable: true`. That is the normal wait, not an error: wait a moment and poll again.
+
+`E_HOST_LAUNCH_FAILED` is not retryable. It means the host could not be launched from this environment: the agent is elevated, `SoulComputerUse.Host.exe` is missing, the caller is not on the interactive console session, process creation was refused, the host exited before taking the lock, or the wait limit passed. Read the message, fix the named cause, and only then retry; an elevated agent cannot start a session, so the human must run `scu start` from a normal-privilege terminal. Do not repeat `start` while the cause stands.
+
+Do not enable the headless owner path (`SOULCOMPUTERUSE_ALLOW_HEADLESS`) in this build; `start` is the supported way to open a session.
 
 ## 4. Operate the child desktop
 
@@ -124,7 +130,8 @@ Ask the user to close the product window and confirm "结束会话". The host mu
 
 | Symptom | Action |
 |---|---|
-| `E_NOT_READY` | Start `SoulComputerUse.Host.exe --new-session`; MCP/CLI only attach to an owner. |
+| `E_NOT_READY` | Call `scu start` / `start_session` first, then poll `status`. During startup and the logon wait this is the normal retryable answer: wait and poll again. |
+| `E_HOST_LAUNCH_FAILED` | The host could not be launched: elevated agent, missing host executable, caller off the console session, or the host exited before the lock. Read the message and fix the named cause; an elevated agent needs the human to run `scu start` with normal privilege. |
 | `E_LOCK_HELD` | Another owner exists. Use it or close it through its window; do not kill it. |
 | `E_AWAITING_CREDENTIALS` | The human must log in in the product window. |
 | `E_BLOCKED` | UAC or a secure desktop is up; stop and let the human finish it. |

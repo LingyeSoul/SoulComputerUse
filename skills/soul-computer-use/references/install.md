@@ -130,7 +130,7 @@ OpenCode (`opencode.json`):
 }
 ```
 
-The MCP server is only a client. It does not open the GUI session; start the host first.
+The MCP server is only a client: it does not own the session. Without one, call the MCP `start_session` tool (or run `scu start`) to open the product window; session tools answer `E_NOT_READY` until the host takes the lock.
 
 ## 6. Smoke test
 
@@ -140,13 +140,13 @@ The MCP server is only a client. It does not open the GUI session; start the hos
 
 This must print the command table and exit with code `0`. It proves the self-contained runtime and the apphost both work.
 
-Then start a session:
+Then start a session through the product:
 
 ```powershell
-Start-Process -FilePath "$install\SoulComputerUse.Host.exe" -ArgumentList '--new-session'
+& "$install\SoulComputerUse.Cli.exe" start
 ```
 
-The product window appears. The human completes the Windows login in that window. When the title bar settles, run:
+`start` prints `ok` as soon as the host takes the machine lock; it does not wait for the login. The product window appears and the human completes the Windows login in that window. Until the login finishes, `status` answers `E_NOT_READY` with `retryable: true`, which is the expected wait. When the title bar settles, run:
 
 ```powershell
 & "$install\SoulComputerUse.Cli.exe" status

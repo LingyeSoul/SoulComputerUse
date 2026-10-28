@@ -84,10 +84,16 @@ pwsh -NoProfile -File .\scripts\package-release.ps1 `
 ```powershell
 $install = Join-Path $env:LOCALAPPDATA 'SoulComputerUse\app'
 & "$install\SoulComputerUse.Cli.exe" --help
+& "$install\SoulComputerUse.Cli.exe" start
+```
+
+`start` 需以普通权限运行（调用方已提权时会被拒绝），在宿主拿到单实例锁后立即返回，不会等登录。等价地，也可以手动启动宿主窗口：
+
+```powershell
 Start-Process -FilePath "$install\SoulComputerUse.Host.exe" -ArgumentList '--new-session'
 ```
 
-在产品窗口里由本人完成 Windows 登录，然后：
+在产品窗口里由本人完成 Windows 登录；登录等待期间 `status` 返回 `E_NOT_READY`（可重试），属正常状态。然后：
 
 ```powershell
 & "$install\SoulComputerUse.Cli.exe" status
@@ -100,7 +106,7 @@ MCP 客户端注册的 stdio 命令是：
 %LOCALAPPDATA%\SoulComputerUse\app\SoulComputerUse.Mcp.exe
 ```
 
-MCP server 只是 owner 的客户端，不会自己拉起 GUI 会话；先启动 `Host`，再调用工具。
+MCP server 只是 owner 的客户端，不会自己持有会话；没有会话时调用 `start_session` 工具（等价于 `scu start`）打开产品窗口，登录仍由本人完成。
 
 ## 使用说明
 

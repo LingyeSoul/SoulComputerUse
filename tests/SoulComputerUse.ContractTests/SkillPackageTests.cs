@@ -58,6 +58,17 @@ public sealed class SkillPackageTests
         Assert.Contains("awaiting-credentials", text);
     }
 
+    [TestMethod]
+    public void TheSkillTellsTheAgentToStartTheSessionBeforePolling()
+    {
+        string text = File.ReadAllText(SkillFile());
+
+        Assert.Contains("scu start", text);
+        Assert.Contains("start_session", text);
+        Assert.Contains("E_HOST_LAUNCH_FAILED", text);
+        Assert.DoesNotContain("Start the GUI host, then let the human complete the Windows login", text);
+    }
+
     /// <summary>Locates the shipped skill by walking up from the test output directory.</summary>
     private static string SkillFile()
     {
