@@ -371,6 +371,10 @@ public sealed class NamedPipeSessionClient : ISessionClient, IAsyncDisposable
                 BreakConnection(stream);
             }
 
+            // End-of-stream is a broken connection too: the cached stream and writer must never be
+            // reused after the owner closed its side, or the next call waits for a response that can
+            // never arrive. Marking it broken makes that call fail immediately with E_DISCONNECTED.
+            MarkBroken(reason);
             FailPending(reason);
         }
     }

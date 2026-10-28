@@ -147,6 +147,33 @@ public sealed class AgentIpcTests
     }
 
     [TestMethod]
+    public async Task ConcurrentCallsDuringHandshakeWaitForTheHandshakeInsteadOfBreakingIt()
+    {
+        string pipeName = NewPipeName();
+        string nonce = AgentNonce.Create();
+        using CancellationTokenSource serverLifetime = new();
+        Task server = RunDelayedHandshakeServerAsync(pipeName, nonce, serverLifetime.Token);
+
+        await using (AgentPipeClient client = new(
+            pipeName,
+            nonce,
+            ClientTimings(),
+            new WindowsAgentProcessProbe()))
+        {
+            Task<SessionStatus> first = client.GetStatusAsync(CancellationToken.None);
+            Task<SessionStatus> second = client.GetStatusAsync(CancellationToken.None);
+
+            SessionStatus[] statuses = await Task.WhenAll(first, second).WaitAsync(CaseTimeout);
+
+            Assert.AreEqual("ready", statuses[0].State);
+            Assert.AreEqual("ready", statuses[1].State);
+        }
+
+        serverLifetime.Cancel();
+        await server.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
     public async Task WrongNonceIsReportedAsIpcPeer()
     {
         string pipeName = NewPipeName();
@@ -972,6 +999,79 @@ public sealed class AgentIpcTests
             }
 
             return SessionToolResult.Success(SessionToolPayloads.OkResult());
+        }
+    }
+
+    /// <summary>
+    /// A raw agent server that deliberately delays its hello frame, so two client calls overlap the
+    /// first connection's handshake. It answers two status requests after the handshake and then
+    /// closes.
+    /// </summary>
+    private static async Task RunDelayedHandshakeServerAsync(
+        string pipeName,
+        string nonce,
+        CancellationToken cancellationToken)
+    {
+        await using NamedPipeServerStream server = new(
+            pipeName,
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        await server.WaitForConnectionAsync(cancellationToken);
+
+        using StreamReader reader = new(server, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, 4096, leaveOpen: true);
+        using StreamWriter writer = new(server, new UTF8Encoding(false), 4096, leaveOpen: true)
+        {
+            AutoFlush = true,
+            NewLine = "\n",
+        };
+
+        // Keep the first caller in its handshake while the second caller enters EnsureConnected.
+        await Task.Delay(500, cancellationToken);
+        await writer.WriteLineAsync(AgentHandshake.WriteHello(nonce).AsMemory(), cancellationToken);
+
+        string? ackLine = await reader.ReadLineAsync(cancellationToken);
+        if (ackLine is null)
+        {
+            throw new AssertFailedException("The client closed before sending hello_ack.");
+        }
+
+        IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
+        if (ack.Request is null)
+        {
+            throw new AssertFailedException("The client did not send hello_ack as a request.");
+        }
+
+        await writer.WriteLineAsync(
+            IpcFrameCodec.WriteResponse(IpcResponse.CreateSuccess(ack.Request.Id, SessionToolPayloads.OkResult())).AsMemory(),
+            cancellationToken);
+
+        for (int requestIndex = 0; requestIndex < 2; requestIndex++)
+        {
+            string? line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null)
+            {
+                throw new AssertFailedException("The client closed before sending both status requests.");
+            }
+
+            IpcFrameParseResult parsed = IpcFrameCodec.Parse(line);
+            if (parsed.Request is null)
+            {
+                throw new AssertFailedException("The client sent a frame that is not a request.");
+            }
+
+            SessionStatus status = new(
+                "ready",
+                SessionId,
+                AuthTier.SystemCredential,
+                GateStrength.Login,
+                new SessionScreen(1920, 1080),
+                null);
+            await writer.WriteLineAsync(
+                IpcFrameCodec.WriteResponse(
+                    IpcResponse.CreateSuccess(parsed.Request.Id, SessionToolPayloads.WriteStatus(status))).AsMemory(),
+                cancellationToken);
         }
     }
 

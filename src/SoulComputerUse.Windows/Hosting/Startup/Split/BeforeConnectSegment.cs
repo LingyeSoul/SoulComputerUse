@@ -57,6 +57,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
     private readonly IAuthTierSource _authTierSource;
     private readonly ILeftoverSweep _leftoverSweep;
     private readonly IChildSessionsGate _childSessionsGate;
+    private readonly IChildSessionsSwitch _childSessionsSwitch;
     private readonly AgentLaunchRequest _launchRequest;
     private readonly IRdpControlSurface _controlSurface;
     private readonly IRdpLaunchSurface _launchSurface;
@@ -65,6 +66,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
     private bool _ran;
     private bool _recordWrittenByThisAttempt;
     private bool _bootstrapMountedByThisAttempt;
+    private bool _childSessionsEnabledByThisAttempt;
 
     /// <summary>Creates one before-connect segment over the ports and the launch values a start needs.</summary>
     /// <exception cref="ArgumentNullException">The options, a port or the launch request is null.</exception>
@@ -75,6 +77,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         IAuthTierSource authTierSource,
         ILeftoverSweep leftoverSweep,
         IChildSessionsGate childSessionsGate,
+        IChildSessionsSwitch childSessionsSwitch,
         AgentLaunchRequest launchRequest,
         IRdpControlSurface controlSurface,
         IRdpLaunchSurface launchSurface)
@@ -85,6 +88,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         ArgumentNullException.ThrowIfNull(authTierSource);
         ArgumentNullException.ThrowIfNull(leftoverSweep);
         ArgumentNullException.ThrowIfNull(childSessionsGate);
+        ArgumentNullException.ThrowIfNull(childSessionsSwitch);
         ArgumentNullException.ThrowIfNull(launchRequest);
         ArgumentNullException.ThrowIfNull(controlSurface);
         ArgumentNullException.ThrowIfNull(launchSurface);
@@ -95,6 +99,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         _authTierSource = authTierSource;
         _leftoverSweep = leftoverSweep;
         _childSessionsGate = childSessionsGate;
+        _childSessionsSwitch = childSessionsSwitch;
         _launchRequest = launchRequest;
         _controlSurface = controlSurface;
         _launchSurface = launchSurface;
@@ -379,6 +384,13 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         {
             result = _childSessionsGate.Enable();
         }
+        catch (TimeoutException)
+        {
+            // The helper may have changed the switch after the caller stopped observing it. The
+            // cleanup path must therefore treat the switch as possibly enabled.
+            _childSessionsEnabledByThisAttempt = true;
+            throw;
+        }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             throw StageFailure(
@@ -398,6 +410,10 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
             _steps.Failed(SessionStartStage.EnableChildSessions, refusal.Code);
             throw new SessionStartException(refusal.Code, refusal.Reason, _steps.Snapshot, innerException: null);
         }
+
+        // The helper reported success, so the switch may already be on even if the read-back below
+        // fails. Cleanup restores it in that case.
+        _childSessionsEnabledByThisAttempt = true;
 
         // Success of the helper is not proof: a helper that reported success while the switch stayed off
         // would let the connection be attempted with the capability still missing. The stage therefore
@@ -542,6 +558,24 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
     private SessionStartException Cleanup(Exception error, IDisposable? lockHandle)
     {
         List<Exception> failures = [];
+
+        // Restore the machine-wide switch before the record and lock disappear. A helper that changed
+        // the switch but then failed its confirmation would otherwise leave the capability enabled
+        // with no record proving who turned it on.
+        if (_childSessionsEnabledByThisAttempt)
+        {
+            try
+            {
+                _childSessionsSwitch.Restore();
+            }
+            catch (Exception restoreError) when (restoreError is not OutOfMemoryException)
+            {
+                failures.Add(restoreError);
+            }
+
+            _childSessionsEnabledByThisAttempt = false;
+        }
+
         if (_recordWrittenByThisAttempt)
         {
             try

@@ -89,6 +89,20 @@ public sealed class BlockedGuard
     }
 
     /// <summary>
+    /// Probes the desktop once and returns its current availability. The caller decides whether the
+    /// verdict blocks an action or is reported through <c>get_status</c>.
+    /// </summary>
+    public DesktopAvailabilityVerdict Observe()
+    {
+        DesktopBlockObservation observation = _probe();
+        return DesktopAvailability.Evaluate(
+            observation.InputDesktopOpenSucceeded,
+            observation.SessionIsActive,
+            observation.InputDesktopName,
+            observation.SessionWindowStation);
+    }
+
+    /// <summary>
     /// Probes the desktop and throws when it cannot accept a tool call.
     /// </summary>
     /// <exception cref="SessionOperationException">
@@ -97,12 +111,7 @@ public sealed class BlockedGuard
     /// </exception>
     public void EnsureUsable()
     {
-        DesktopBlockObservation observation = _probe();
-        DesktopAvailabilityVerdict verdict = DesktopAvailability.Evaluate(
-            observation.InputDesktopOpenSucceeded,
-            observation.SessionIsActive,
-            observation.InputDesktopName,
-            observation.SessionWindowStation);
+        DesktopAvailabilityVerdict verdict = Observe();
 
         if (verdict == DesktopAvailabilityVerdict.Usable)
         {

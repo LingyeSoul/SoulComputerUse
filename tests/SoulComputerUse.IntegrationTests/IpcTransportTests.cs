@@ -82,6 +82,33 @@ public sealed class IpcTransportTests
     }
 
     [TestMethod]
+    public async Task AClientFailsFastAfterTheOwnerClosesItsSide()
+    {
+        string pipeName = NewPipeName();
+        await using NamedPipeSessionServer server = new(pipeName, new StubSessionToolHandler());
+        using CancellationTokenSource serverLifetime = new();
+        Task acceptLoop = server.RunAsync(serverLifetime.Token);
+
+        await using (NamedPipeSessionClient client = new(pipeName))
+        {
+            SessionStatus status = await client.GetStatusAsync(CancellationToken.None).WaitAsync(CaseTimeout);
+            Assert.AreEqual("ready", status.State);
+
+            serverLifetime.Cancel();
+            await acceptLoop.WaitAsync(CaseTimeout);
+            await server.DisposeAsync().AsTask().WaitAsync(CaseTimeout);
+
+            SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+                () => client.GetStatusAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)));
+
+            Assert.AreEqual(
+                SessionErrorCode.Disconnected,
+                error.Code,
+                "A closed owner connection must fail immediately instead of waiting for the action timeout.");
+        }
+    }
+
+    [TestMethod]
     public async Task ErrorResponseBecomesSessionOperationExceptionWithTheContractCode()
     {
         string pipeName = NewPipeName();

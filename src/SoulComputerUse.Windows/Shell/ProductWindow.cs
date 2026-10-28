@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -31,6 +32,8 @@ public sealed class ProductWindow : IDisposable
     /// <summary>The registered window class name.</summary>
     public const string WindowClassName = "SoulComputerUse.ProductWindow";
 
+    /// <summary>A private message used to apply a status posted from a worker thread.</summary>
+    private const uint WmAppStatus = 0x8000 + 1;
 
     private static readonly object RegistrationLock = new();
     private static readonly Dictionary<nint, ProductWindow> OpenWindows = new();
@@ -40,6 +43,7 @@ public sealed class ProductWindow : IDisposable
 
     private readonly Func<bool> _confirmClose;
 
+    private readonly ConcurrentQueue<SessionStatusVisual> _postedStatuses = new();
     private nint _handle;
     private string _title;
     private SessionStatusVisual _status;
@@ -252,6 +256,39 @@ public sealed class ProductWindow : IDisposable
         RequestRepaint();
     }
 
+    /// <summary>
+    /// Queues a status update from a worker thread. The window procedure applies it on the thread that
+    /// owns the window, so the owner pipe can report a blocked or disconnected session without touching
+    /// window state across threads.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="status"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The window was destroyed.</exception>
+    /// <exception cref="InvalidOperationException">The message could not be posted.</exception>
+    public void PostStatus(SessionStatusVisual status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        nint handle = RequireHandle();
+        _postedStatuses.Enqueue(status);
+        if (!NativeMethods.PostMessageW(handle, WmAppStatus, 0, 0))
+        {
+            throw new InvalidOperationException(
+                "The status update could not be posted to the product window.");
+        }
+    }
+
+    private void ApplyPostedStatus()
+    {
+        while (_postedStatuses.TryDequeue(out SessionStatusVisual? status))
+        {
+            if (status is not null)
+            {
+                _status = status;
+            }
+        }
+
+        RequestRepaint();
+    }
+
     /// <summary>Replaces the window title and repaints.</summary>
     public void SetTitle(string title)
     {
@@ -413,6 +450,9 @@ public sealed class ProductWindow : IDisposable
                 return 0;
             case NativeMethods.WmDpiChanged when window is not null:
                 window.ApplyDpiChange(handle, wParam, lParam);
+                return 0;
+            case WmAppStatus when window is not null:
+                window.ApplyPostedStatus();
                 return 0;
             case NativeMethods.WmClose when window is not null:
                 window.RequestClose(handle);
@@ -920,28 +960,84 @@ public sealed class ProductWindow : IDisposable
             return;
         }
 
-        _metrics = CaptionMetrics.Create(ReadClientWidth(handle), dpi, TextScaleProbe.GetTextScalePercent());
-        RecomputePictureBounds();
-        RepositionPictureSurface();
-        if (lParam != 0)
+        NativeRect suggested = default;
+        bool hasSuggested = lParam != 0;
+        if (hasSuggested)
         {
-            NativeRect suggested = Marshal.PtrToStructure<NativeRect>(lParam);
+            suggested = Marshal.PtrToStructure<NativeRect>(lParam);
+        }
+
+        // Apply the suggested rectangle before measuring the new layout. A narrow window moved onto a
+        // higher-DPI monitor can otherwise be measured below the new minimum width, which would throw
+        // out of the window procedure instead of repainting the caption.
+        int minimumWidth = CaptionMetrics.Scale(CaptionMetrics.MinimumClientWidth, dpi);
+        if (hasSuggested)
+        {
+            int suggestedWidth = suggested.Right - suggested.Left;
+            int suggestedHeight = suggested.Bottom - suggested.Top;
             _ = NativeMethods.SetWindowPos(
                 handle,
                 0,
                 suggested.Left,
                 suggested.Top,
-                suggested.Right - suggested.Left,
-                suggested.Bottom - suggested.Top,
+                Math.Max(suggestedWidth, minimumWidth),
+                suggestedHeight,
                 NativeMethods.SwpNoZOrder | NativeMethods.SwpNoActivate);
         }
 
+        int clientWidth;
+        try
+        {
+            clientWidth = ReadClientWidth(handle);
+        }
+        catch (InvalidOperationException)
+        {
+            RequestRepaint();
+            return;
+        }
+
+        if (clientWidth < minimumWidth)
+        {
+            // The window could not be widened to the new minimum; keep the previous layout rather
+            // than letting CaptionMetrics throw through the native message dispatch.
+            RequestRepaint();
+            return;
+        }
+
+        try
+        {
+            _metrics = CaptionMetrics.Create(clientWidth, dpi, TextScaleProbe.GetTextScalePercent());
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+        {
+            RequestRepaint();
+            return;
+        }
+
+        RecomputePictureBounds();
+        RepositionPictureSurface();
         RequestRepaint();
     }
 
     private void RequestClose(nint handle)
     {
-        if (!_confirmClose())
+        bool confirmed;
+        try
+        {
+            confirmed = _confirmClose();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // A failed confirmation must never unwind through the window procedure. Keep the window
+            // alive so the operator can retry after the dialog failure is fixed.
+            Console.Error.WriteLine(
+                "E_MANUAL_INTERVENTION The close confirmation could not be shown ("
+                + error.GetType().Name
+                + "), so the window remains open.");
+            return;
+        }
+
+        if (!confirmed)
         {
             return;
         }

@@ -99,6 +99,21 @@ public sealed class ProductWindowCloseConfirmationAdversarialTests
             "The window must still exist while the operator is being asked, so a cancel can return to it.");
     }
 
+    /// <summary>
+    /// A confirmation that throws must be contained inside the window procedure: the window stays
+    /// alive and the operator can try again instead of the process terminating through WM_CLOSE.
+    /// </summary>
+    [TestMethod]
+    public void AThrowingConfirmationLeavesTheWindowAlive()
+    {
+        using ProductWindow window = CreateWindow(
+            () => throw new InvalidOperationException("the confirmation dialog could not be shown"));
+
+        window.SendCloseRequest();
+
+        Assert.IsFalse(window.IsDestroyed, "A failed confirmation must keep the window alive.");
+    }
+
     private static ProductWindow CreateWindow(Func<bool> confirmClose)
     {
         return ProductWindow.Create(

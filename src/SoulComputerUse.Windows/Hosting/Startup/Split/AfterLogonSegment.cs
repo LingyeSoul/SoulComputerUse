@@ -46,7 +46,9 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
     private readonly IOwnerPipeHost _ownerPipeHost;
     private readonly IProcessSessionLookup _processSessionLookup;
     private readonly BeforeConnectResult _beforeConnect;
+    private readonly Action<SessionState>? _stateChanged;
     private readonly SplitStepLog _steps = new();
+    private readonly object _runtimeStateGate = new();
 
     private bool _ran;
     private AgentConnection? _agent;
@@ -61,6 +63,30 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
         IOwnerPipeHost ownerPipeHost,
         IProcessSessionLookup processSessionLookup,
         BeforeConnectResult beforeConnect)
+        : this(
+            options,
+            recordStore,
+            agentConnector,
+            ownerPipeHost,
+            processSessionLookup,
+            beforeConnect,
+            stateChanged: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates one after-logon segment with a runtime-state observer. The observer is called after the
+    /// ownership record has been updated, so a caller can refresh a window without racing the record.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The options, a port or the before-connect result is null.</exception>
+    public AfterLogonSegment(
+        SessionStartOptions options,
+        IOwnerRecordStore recordStore,
+        IAgentConnector agentConnector,
+        IOwnerPipeHost ownerPipeHost,
+        IProcessSessionLookup processSessionLookup,
+        BeforeConnectResult beforeConnect,
+        Action<SessionState>? stateChanged)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(recordStore);
@@ -75,6 +101,7 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
         _ownerPipeHost = ownerPipeHost;
         _processSessionLookup = processSessionLookup;
         _beforeConnect = beforeConnect;
+        _stateChanged = stateChanged;
     }
 
     /// <summary>
@@ -85,6 +112,13 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
 
     /// <summary>The stages this segment has executed so far, in contract order.</summary>
     public IReadOnlyList<SessionStartStepResult> SessionStartSteps => _steps.Snapshot;
+
+    /// <summary>
+    /// The Windows session id recorded from the attached agent, or zero before a successful read. The
+    /// shutdown path uses this recorded value instead of asking the agent process again, so a process
+    /// that has already exited cannot strand the ownership record or the lock.
+    /// </summary>
+    public int SubagentWtsSessionId => _subagentWtsSessionId;
 
     /// <summary>
     /// Attaches the agent, records its Windows session, starts the owner pipe and writes <c>ready</c>.
@@ -190,7 +224,9 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
     {
         try
         {
-            _ownerPipeHost.Start(new SessionClientToolHandler(agent.Client));
+            // The owner pipe is the first component that sees a blocked desktop or a lost agent at
+            // runtime, so it reports those transitions into the ownership record as they happen.
+            _ownerPipeHost.Start(new SessionClientToolHandler(agent.Client, ReportRuntimeState));
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -227,6 +263,33 @@ public sealed class AfterLogonSegment : ISessionStartAfterLogon
         }
 
         _steps.Succeeded(stage);
+    }
+
+    /// <summary>
+    /// Rewrites the ownership record with a runtime state observed by the owner pipe. The write is
+    /// best effort: a failed status update must not replace the tool result, and the handler that owns
+    /// the observer reports the failure.
+    /// </summary>
+    private void ReportRuntimeState(SessionState state)
+    {
+        if (_subagentWtsSessionId <= 0)
+        {
+            return;
+        }
+
+        lock (_runtimeStateGate)
+        {
+            _recordStore.Write(new SessionOwnerRecord(
+                _options.SessionId,
+                _options.HostPid,
+                _options.HostProcessStartTime,
+                _subagentWtsSessionId,
+                _beforeConnect.ChildSessionsOpenedByUs,
+                state,
+                _options.AcquiredAt));
+        }
+
+        _stateChanged?.Invoke(state);
     }
 
     /// <summary>Records one failed stage and builds the refusal that reports it.</summary>

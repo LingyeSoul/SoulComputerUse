@@ -40,6 +40,12 @@ public sealed class AgentAttachedSession : IAsyncDisposable
     public SessionStatus? Status { get; private set; }
 
     /// <summary>
+    /// Raised after a runtime transition observed by the owner pipe, for example <c>blocked</c> or
+    /// <c>disconnected</c>. The event is raised on the pipe's worker thread.
+    /// </summary>
+    public event Action<SessionState>? StateChanged;
+
+    /// <summary>
     /// Builds the production attached session: the owner pipe, the owner record and the agent pipe
     /// client all use the supplied session id and binding nonce.
     /// </summary>
@@ -61,9 +67,32 @@ public sealed class AgentAttachedSession : IAsyncDisposable
             nonce,
             AgentClientTimings.Contract,
             new WindowsAgentProcessProbe());
-        SessionClientToolHandler handler = new(client);
-        SessionOwnerService owner = SessionOwnerService.ForCurrentProcess(handler, sessionId);
-        return new AgentAttachedSession(client, owner);
+
+        // The owner is built after its handler, so the runtime-state observer reads the owner through
+        // a captured variable. Only a lost or blocked session is forwarded; a repeated ready status
+        // must not attempt a ready -> ready transition.
+        SessionOwnerService? owner = null;
+        AgentAttachedSession? session = null;
+        SessionClientToolHandler handler = new(client, state =>
+        {
+            if (owner is null
+                || state is not (SessionState.Ready or SessionState.Blocked or SessionState.Disconnected)
+                || !SessionStateMachine.CanTransition(owner.CurrentState, state))
+            {
+                return;
+            }
+
+            owner.Transition(state);
+            session?.NotifyStateChanged(state);
+        });
+        owner = SessionOwnerService.ForCurrentProcess(handler, sessionId);
+        session = new AgentAttachedSession(client, owner);
+        return session;
+    }
+
+    private void NotifyStateChanged(SessionState state)
+    {
+        StateChanged?.Invoke(state);
     }
 
     /// <summary>

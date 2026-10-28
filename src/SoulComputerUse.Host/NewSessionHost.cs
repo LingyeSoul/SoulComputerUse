@@ -105,15 +105,21 @@ internal sealed class NewSessionHost : IDisposable
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            App.ShowStartupError(DescribeFailure(error));
-
             // A start that never reached ready must not leave its machine footprint behind: the child
-            // session it created answers a later connection without asking for a logon, and the start-up
-            // entry it mounted would start an agent on the next logon of this account. Running both
-            // cleanups here — after the operator has read the refusal — is what keeps the abort path as
-            // settled as the normal close path.
-            ReleaseUnfinishedChildSession();
-            RemoveAgentBootstrap();
+            // session it created answers a later connection without asking for a logon, the start-up
+            // entry it mounted would start an agent on the next logon of this account, and the ownership
+            // record or the machine-wide switch may still be held. Clean every one of them before the
+            // refusal is shown, so the operator can retry immediately.
+            bool cleanupFailed = CleanupFailedStart();
+
+            string description = DescribeFailure(error);
+            if (cleanupFailed)
+            {
+                description += Environment.NewLine
+                    + "E_MANUAL_INTERVENTION The failed start could not release every resource; the ownership record or the machine-wide child-session switch may remain.";
+            }
+
+            App.ShowStartupError(description);
             Dispose();
             return 1;
         }
@@ -140,6 +146,80 @@ internal sealed class NewSessionHost : IDisposable
                 + " The child-session agent start-up entry could not be removed; the agent will refuse to run on the next console logon. Cause: "
                 + error.Message);
         }
+    }
+
+    /// <summary>
+    /// Releases everything a start that never reached ready may have taken: the child session it
+    /// created, the machine-wide child-session switch, the start-up entry, the agent connection, the
+    /// ownership record and finally the single-instance lock. Every step is attempted even when an
+    /// earlier one fails, so one broken port cannot hide another.
+    /// </summary>
+    /// <returns>True when at least one release step failed; the caller must report manual intervention.</returns>
+    private bool CleanupFailedStart()
+    {
+        List<Exception> failures = [];
+
+        // A child session left logged on would answer the next connection without a logon, so the
+        // session this run created is logged off first. The method reports its own failure.
+        ReleaseUnfinishedChildSession();
+
+        // The switch is machine-wide; only this run may restore it, and only when the before-connect
+        // segment recorded that this run turned it on.
+        BeforeConnectResult? beforeConnect = _beforeConnect?.Result;
+        if (beforeConnect is not null && beforeConnect.ChildSessionsOpenedByUs)
+        {
+            try
+            {
+                new ChildSessionsSwitchRestore().Restore();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
+        }
+
+        RemoveAgentBootstrap();
+
+        // The owner pipe stops before the record disappears, then the lock is released. The release
+        // helper attempts all three steps and aggregates failures, so a failed delete cannot leave the
+        // lock held until process exit.
+        if (beforeConnect is not null)
+        {
+            try
+            {
+                new OwnerAndLockRelease(_recordStore, _ownerPipe, beforeConnect.LockHandle).Release();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
+        }
+        else if (_ownerPipe is not null)
+        {
+            try
+            {
+                _ownerPipe.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
+        }
+
+        AgentConnection? agent = _afterLogon?.Segment?.AgentConnection;
+        if (agent is not null)
+        {
+            try
+            {
+                CloseAgent(agent.Client);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
+        }
+
+        return failures.Count > 0;
     }
 
     /// <summary>Disposes the window and the control. Idempotent.</summary>
@@ -179,6 +259,7 @@ internal sealed class NewSessionHost : IDisposable
             CreateAuthTierSource(),
             new ProductionLeftoverSweep(),
             new ProductionChildSessionsGate(_plan.ApplicationDirectory, ElevationTimeoutMilliseconds),
+            new ChildSessionsSwitchRestore(),
             launchRequest,
             surface,
             new DynamicRdpLaunchSurface(surface.Ocx)));
@@ -204,7 +285,8 @@ internal sealed class NewSessionHost : IDisposable
                     waitClock),
                 ownerPipe,
                 new WindowsProcessSessionLookup(),
-                result));
+                result,
+                UpdateProductStatus));
 
         // The session snapshot is taken before the connection: the one session id that appears afterwards
         // is the session this run created, so no leftover or another account's session can answer the logon
@@ -313,6 +395,45 @@ internal sealed class NewSessionHost : IDisposable
     private int FittedClientHeight() => FittedClient().Height;
 
     /// <summary>
+    /// Queues a runtime status for the product window. The owner pipe calls this from a worker
+    /// thread; the window applies it through its own message loop.
+    /// </summary>
+    private void UpdateProductStatus(SessionState state)
+    {
+        ProductWindow? window = _productWindow;
+        if (window is null || window.IsDestroyed)
+        {
+            return;
+        }
+
+        AuthTier? tier = _beforeConnect?.AuthTier;
+        if (tier is null || tier == AuthTier.None)
+        {
+            return;
+        }
+
+        BlockedCause? blockedCause = state == SessionState.Blocked
+            ? BlockedCause.ProtectedDesktop
+            : null;
+
+        try
+        {
+            window.PostStatus(SessionStatusVisuals.Describe(
+                state,
+                tier.Value,
+                AuthTierRules.StrengthFor(tier.Value),
+                blockedCause));
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine(
+                "E_MANUAL_INTERVENTION The product window status could not be updated ("
+                + error.GetType().Name
+                + ").");
+        }
+    }
+
+    /// <summary>
     /// Sizes the window so the letterboxed picture fills the area below the caption with no black bars:
     /// a fixed client size would letterbox every session whose ratio differs from it, which reads as a
     /// broken picture rather than a window.
@@ -343,7 +464,11 @@ internal sealed class NewSessionHost : IDisposable
         try
         {
             RemoveAgentBootstrap();
-            int childSessionId = ReadChildSessionId(agent.AgentProcessId);
+
+            // Use the session id recorded at attach time. Re-reading it from the live agent process
+            // fails as soon as the agent exits, which would skip teardown exactly when the process
+            // needs it most and leave a ready record for the next start to trip over.
+            int childSessionId = _afterLogon?.Segment?.SubagentWtsSessionId ?? 0;
             bool openedByUs = beforeConnect.ChildSessionsOpenedByUs;
 
             SessionShutdownPlan plan = SessionShutdown.Plan(new SessionShutdownRequest(
@@ -497,16 +622,6 @@ internal sealed class NewSessionHost : IDisposable
     }
 
     private ChildSessionLogonTracker? _logonTracker;
-
-    private static int ReadChildSessionId(int agentProcessId)
-    {
-        if (agentProcessId <= 0)
-        {
-            return 0;
-        }
-
-        return new WindowsProcessSessionLookup().SessionIdFor(agentProcessId);
-    }
 
     private static void CloseAgent(SoulComputerUse.Core.Protocol.ISessionClient client)
     {

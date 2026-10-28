@@ -517,7 +517,8 @@ public sealed class SessionAgentTests
             SessionId,
             AuthTier.SystemCredential,
             GateStrength.Login,
-            helloHint: null);
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.Usable);
 
         SessionStatus status = await client.GetStatusAsync(CancellationToken.None);
         Assert.AreEqual("ready", status.State);
@@ -547,6 +548,28 @@ public sealed class SessionAgentTests
     }
 
     [TestMethod]
+    public async Task DesktopClientReportsBlockedWhenTheInputDesktopCannotBeUsed()
+    {
+        FakeDesktopSurface surface = new()
+        {
+            Screen = new DesktopScreen(0, 0, 100, 100),
+            Frame = [1],
+        };
+        DesktopSessionClient client = new(
+            surface,
+            SessionId,
+            AuthTier.SystemCredential,
+            GateStrength.Login,
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.BlockedSecureDesktop);
+
+        SessionStatus status = await client.GetStatusAsync(CancellationToken.None);
+
+        Assert.AreEqual("blocked", status.State);
+        CollectionAssert.AreEqual(surface.Frame, await client.ScreenshotAsync(CancellationToken.None));
+    }
+
+    [TestMethod]
     public async Task DesktopClientReportsTheOperatorHintItWasGiven()
     {
         FakeDesktopSurface surface = new()
@@ -559,7 +582,8 @@ public sealed class SessionAgentTests
             SessionId,
             AuthTier.SystemCredential,
             GateStrength.Login,
-            AgentAuthTier.HelloNotEnrolledHint);
+            AgentAuthTier.HelloNotEnrolledHint,
+            static () => DesktopAvailabilityVerdict.Usable);
 
         SessionStatus status = await client.GetStatusAsync(CancellationToken.None);
 
@@ -581,21 +605,24 @@ public sealed class SessionAgentTests
                 SessionId,
                 AuthTier.HelloEnrolled,
                 GateStrength.Strong,
-                AgentAuthTier.HelloNotEnrolledHint));
+                AgentAuthTier.HelloNotEnrolledHint,
+                static () => DesktopAvailabilityVerdict.Usable));
         Assert.ThrowsExactly<ArgumentException>(
             () => new DesktopSessionClient(
                 surface,
                 SessionId,
                 AuthTier.SystemCredential,
                 GateStrength.Login,
-                "some other hint"));
+                "some other hint",
+                static () => DesktopAvailabilityVerdict.Usable));
         Assert.ThrowsExactly<ArgumentException>(
             () => new DesktopSessionClient(
                 surface,
                 SessionId,
                 AuthTier.None,
                 GateStrength.Login,
-                helloHint: null));
+                helloHint: null,
+                static () => DesktopAvailabilityVerdict.Usable));
     }
 
     [TestMethod]
@@ -611,7 +638,8 @@ public sealed class SessionAgentTests
             SessionId,
             AuthTier.HelloEnrolled,
             GateStrength.Strong,
-            helloHint: null);
+            helloHint: null,
+            static () => DesktopAvailabilityVerdict.Usable);
         using CancellationTokenSource cancelled = new();
         cancelled.Cancel();
 

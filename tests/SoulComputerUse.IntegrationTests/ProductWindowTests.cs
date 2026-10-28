@@ -1,6 +1,8 @@
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Native;
 using SoulComputerUse.Windows.Shell;
@@ -386,6 +388,27 @@ public sealed class ProductWindowTests
             GateStrength.Login,
             null));
         window.RepaintNow();
+    }
+
+    [TestMethod]
+    public void AStatusPostedFromAWorkerThreadIsAppliedOnTheWindowThread()
+    {
+        using ProductWindow window = CreateWindow(() => false);
+        SessionStatusVisual disconnected = SessionStatusVisuals.Describe(
+            SessionState.Disconnected,
+            AuthTier.HelloEnrolled,
+            GateStrength.Strong,
+            null);
+
+        Task.Run(() => window.PostStatus(disconnected)).GetAwaiter().GetResult();
+
+        for (int attempt = 0; attempt < 100 && window.Status != disconnected; attempt++)
+        {
+            _ = MessagePump.PumpOnce();
+            Thread.Sleep(10);
+        }
+
+        Assert.AreEqual(disconnected, window.Status);
     }
 
     [TestMethod]

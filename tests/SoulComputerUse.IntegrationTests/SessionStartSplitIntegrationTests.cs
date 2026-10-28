@@ -107,6 +107,7 @@ public sealed class SessionStartSplitIntegrationTests
             testCase.Tier,
             testCase.Sweep,
             testCase.Gate,
+            testCase.Switch,
             CreateLaunchRequest(_root, _sessionId),
             new FakeControlSurface(),
             testCase.Launch).Execute();
@@ -157,6 +158,7 @@ public sealed class SessionStartSplitIntegrationTests
             testCase.Tier,
             testCase.Sweep,
             testCase.Gate,
+            testCase.Switch,
             CreateLaunchRequest(_root, _sessionId),
             new FakeControlSurface(),
             testCase.Launch).Execute();
@@ -222,6 +224,7 @@ public sealed class SessionStartSplitIntegrationTests
             testCase.Tier,
             testCase.Sweep,
             testCase.Gate,
+            testCase.Switch,
             CreateLaunchRequest(_root, _sessionId),
             new FakeControlSurface(),
             testCase.Launch).Execute();
@@ -263,6 +266,7 @@ public sealed class SessionStartSplitIntegrationTests
                 testCase.Tier,
                 testCase.Sweep,
                 testCase.Gate,
+                testCase.Switch,
                 CreateLaunchRequest(_root, _sessionId),
                 new FakeControlSurface(),
                 testCase.Launch).Execute());
@@ -291,6 +295,7 @@ public sealed class SessionStartSplitIntegrationTests
                 testCase.Tier,
                 testCase.Sweep,
                 testCase.Gate,
+                testCase.Switch,
                 CreateLaunchRequest(_root, _sessionId),
                 new FakeControlSurface(),
                 testCase.Launch).Execute());
@@ -346,6 +351,7 @@ public sealed class SessionStartSplitIntegrationTests
             Tier = new FakeAuthTierSource(Calls);
             Sweep = new FakeSweep(Calls);
             Gate = new FakeChildSessionsGate(Calls);
+            Switch = new FakeChildSessionsSwitch(Calls);
             Launch = new RecordingLaunchSurface(Calls);
             Agent = new FakeAgentConnector(Calls);
             Pipe = new FakeOwnerPipeHost(Calls);
@@ -363,6 +369,8 @@ public sealed class SessionStartSplitIntegrationTests
         internal FakeSweep Sweep { get; }
 
         internal FakeChildSessionsGate Gate { get; }
+
+        internal FakeChildSessionsSwitch Switch { get; }
 
         internal RecordingLaunchSurface Launch { get; }
 
@@ -541,6 +549,25 @@ public sealed class SessionStartSplitIntegrationTests
                 PolicyValue.ChildConnections => ChildSessionsPolicy.ChildConnectionsValueName,
                 _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown policy value."),
             };
+        }
+    }
+
+    /// <summary>A switch restore port that records the failed-start restore.</summary>
+    private sealed class FakeChildSessionsSwitch : IChildSessionsSwitch
+    {
+        private readonly List<string> _calls;
+
+        internal FakeChildSessionsSwitch(List<string> calls)
+        {
+            _calls = calls;
+        }
+
+        internal int RestoreCount { get; private set; }
+
+        public void Restore()
+        {
+            RestoreCount++;
+            _calls.Add("switch.restore");
         }
     }
 

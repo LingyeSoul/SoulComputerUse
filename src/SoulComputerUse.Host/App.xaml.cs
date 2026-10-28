@@ -93,12 +93,12 @@ public partial class App : Application
         }
         else
         {
-            SessionStatusVisual status = SessionStatusVisuals.Describe(
-                SessionState.Starting,
-                AuthTier.HelloEnrolled,
-                GateStrength.Strong,
-                null);
-            ShowProductWindow(status, "example-session");
+            ShowStartupError(
+                "Usage: SoulComputerUse.Host.exe --new-session"
+                + Environment.NewLine
+                + "       SoulComputerUse.Host.exe --attach-agent <uuid> --agent-nonce <32-hex>");
+            Shutdown(2);
+            return;
         }
 
         Shutdown();
@@ -166,6 +166,37 @@ public partial class App : Application
             SessionStatusVisuals.BuildTitle(sessionLabel),
             ConfirmClose,
             status);
+
+        if (_attachedSession is not null)
+        {
+            _attachedSession.StateChanged += state =>
+            {
+                if (_productWindow is null
+                    || _attachedSession.Status is not SessionStatus current)
+                {
+                    return;
+                }
+
+                BlockedCause? blockedCause = state == SessionState.Blocked
+                    ? BlockedCause.ProtectedDesktop
+                    : null;
+                try
+                {
+                    _productWindow.PostStatus(SessionStatusVisuals.Describe(
+                        state,
+                        current.AuthTier,
+                        current.GateStrength,
+                        blockedCause));
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    Console.Error.WriteLine(
+                        "E_MANUAL_INTERVENTION The product window status could not be updated ("
+                        + error.GetType().Name
+                        + ").");
+                }
+            };
+        }
 
         MessageLoop.Run();
     }

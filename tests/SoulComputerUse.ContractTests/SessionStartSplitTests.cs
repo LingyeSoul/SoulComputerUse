@@ -206,6 +206,10 @@ public sealed class SessionStartSplitTests
         Assert.AreEqual(SessionErrorCode.ChildSessionsDeclined, error.Code, error.Message);
         Assert.IsTrue(fixture.Handle.Disposed);
         Assert.IsFalse(fixture.Records.Exists);
+        Assert.AreEqual(
+            0,
+            fixture.Switch.RestoreCount,
+            "A declined elevation never changed the switch, so cleanup must not touch it.");
         Assert.IsEmpty(fixture.Launch.Writes);
         Assert.AreEqual(
             SessionStartStage.EnableChildSessions,
@@ -254,6 +258,10 @@ public sealed class SessionStartSplitTests
 
         Assert.AreEqual(SessionErrorCode.ChildSessionsDisabled, error.Code, error.Message);
         Assert.AreEqual(1, fixture.Records.WriteCount, "The marker must not be written when the read-back says the switch is off.");
+        Assert.AreEqual(
+            1,
+            fixture.Switch.RestoreCount,
+            "A helper that reported success but left the switch off must still be followed by a restore attempt.");
         Assert.IsTrue(fixture.Handle.Disposed);
         Assert.IsFalse(fixture.Records.Exists);
     }
@@ -391,6 +399,10 @@ public sealed class SessionStartSplitTests
         Assert.IsTrue(result.OwnerPipeStarted);
         Assert.AreEqual(ChildSessionId, result.SubagentWtsSessionId);
         Assert.IsTrue(result.RecordReady);
+        Assert.AreEqual(
+            ChildSessionId,
+            fixture.Segment.SubagentWtsSessionId,
+            "The shutdown path must reuse the child session id recorded at attach time.");
         Assert.IsNotNull(fixture.Segment.AgentConnection);
         Assert.AreSame(
             fixture.Agent.Connection,
@@ -407,6 +419,26 @@ public sealed class SessionStartSplitTests
                 SessionStartStage.WriteReady,
             },
             Stages(fixture.Segment.SessionStartSteps));
+    }
+
+    [TestMethod]
+    public async Task TheAfterLogonOwnerPipeReportsALostAgentIntoTheOwnershipRecord()
+    {
+        AfterLogonFixture fixture = new();
+
+        fixture.Segment.Execute();
+        ISessionToolHandler handler = fixture.Pipe.Handler
+            ?? throw new AssertFailedException("The owner pipe did not receive its runtime handler.");
+        SessionToolResult result = await handler.HandleAsync(
+            SessionTool.GetStatus,
+            SessionToolPayloads.EmptyArguments(),
+            CancellationToken.None);
+
+        Assert.IsFalse(result.Succeeded, "The fake agent has no transport, so the status call must fail.");
+        Assert.AreEqual(
+            SessionState.Disconnected,
+            fixture.Records.Record?.State,
+            "A lost agent must be recorded as disconnected so the next start can recover.");
     }
 
     [TestMethod]
@@ -724,6 +756,7 @@ public sealed class SessionStartSplitTests
             Tier = new FakeAuthTierSource(Calls);
             Sweep = new FakeSweep(Calls);
             Gate = new FakeChildSessionsGate(Calls);
+            Switch = new FakeChildSessionsSwitch(Calls);
             Launch = new RecordingLaunchSurface(Calls);
             Control = new FakeControlSurface();
             Segment = new BeforeConnectSegment(
@@ -733,6 +766,7 @@ public sealed class SessionStartSplitTests
                 Tier,
                 Sweep,
                 Gate,
+                Switch,
                 CreateLaunchRequest(),
                 Control,
                 Launch);
@@ -756,6 +790,8 @@ public sealed class SessionStartSplitTests
         internal FakeSweep Sweep { get; }
 
         internal FakeChildSessionsGate Gate { get; }
+
+        internal FakeChildSessionsSwitch Switch { get; }
 
         internal RecordingLaunchSurface Launch { get; }
 
@@ -1030,6 +1066,25 @@ public sealed class SessionStartSplitTests
         }
     }
 
+    /// <summary>A switch restore port that records whether the failed-start cleanup ran it.</summary>
+    private sealed class FakeChildSessionsSwitch : IChildSessionsSwitch
+    {
+        private readonly List<string> _calls;
+
+        internal FakeChildSessionsSwitch(List<string> calls)
+        {
+            _calls = calls;
+        }
+
+        internal int RestoreCount { get; private set; }
+
+        public void Restore()
+        {
+            RestoreCount++;
+            _calls.Add("switch.restore");
+        }
+    }
+
     /// <summary>
     /// A launch surface that records each property write, so a case can prove both the order and that a
     /// refused start wrote nothing at all.
@@ -1237,10 +1292,13 @@ public sealed class SessionStartSplitTests
 
         internal int Count { get; private set; }
 
+        internal ISessionToolHandler? Handler { get; private set; }
+
         public void Start(ISessionToolHandler handler)
         {
             ArgumentNullException.ThrowIfNull(handler);
             Count++;
+            Handler = handler;
             _calls.Add("pipe.start");
             if (Failure is not null)
             {

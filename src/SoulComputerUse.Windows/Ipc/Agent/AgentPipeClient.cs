@@ -255,7 +255,10 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
                 throw _brokenReason;
             }
 
-            if (_stream is not null)
+            // A connection is usable only when both the stream and the writer have been published.
+            // The stream alone is visible during the handshake, so treating it as connected would let
+            // a second caller reach WriteLineAsync with a null writer and break the first handshake.
+            if (_stream is not null && _writer is not null)
             {
                 return;
             }
@@ -271,7 +274,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
                     throw _brokenReason;
                 }
 
-                if (_stream is not null)
+                if (_stream is not null && _writer is not null)
                 {
                     return;
                 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Startup;
@@ -82,12 +83,48 @@ internal sealed class OwnerAndLockRelease : ISingleInstanceLockRelease
     /// <inheritdoc />
     public void Release()
     {
+        List<Exception> failures = [];
+
+        // Stop accepting calls before the record disappears. A caller that already read the record must
+        // not reach a pipe that is still serving during teardown.
         if (_ownerPipe is not null)
         {
-            _ownerPipe.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try
+            {
+                _ownerPipe.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
         }
 
-        _recordStore.Delete();
-        _lockHandle?.Dispose();
+        try
+        {
+            _recordStore.Delete();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            failures.Add(error);
+        }
+
+        if (_lockHandle is not null)
+        {
+            try
+            {
+                _lockHandle.Dispose();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                failures.Add(error);
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(
+                "The session release could not stop the owner pipe, delete the ownership record, or close the single-instance lock; every step was attempted.",
+                failures);
+        }
     }
 }

@@ -27,12 +27,24 @@ namespace SoulComputerUse.Windows.Hosting;
 public sealed class SessionClientToolHandler : ISessionToolHandler
 {
     private readonly ISessionClient _client;
+    private readonly Action<SessionState>? _stateChanged;
 
     /// <summary>Creates the handler around the session client that executes the calls.</summary>
     public SessionClientToolHandler(ISessionClient client)
+        : this(client, stateChanged: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates the handler with a runtime-state observer. The observer receives <c>blocked</c> when a
+    /// tool reports a protected desktop and <c>disconnected</c> when the agent pipe is lost; a failure
+    /// in the observer is reported and never replaces the tool result.
+    /// </summary>
+    public SessionClientToolHandler(ISessionClient client, Action<SessionState>? stateChanged)
     {
         ArgumentNullException.ThrowIfNull(client);
         _client = client;
+        _stateChanged = stateChanged;
     }
 
     /// <inheritdoc />
@@ -47,6 +59,7 @@ public sealed class SessionClientToolHandler : ISessionToolHandler
                 {
                     SessionStatus status = await _client.GetStatusAsync(cancellationToken).ConfigureAwait(false);
                     status.Validate();
+                    ReportStatusState(status);
                     return SessionToolResult.Success(SessionToolPayloads.WriteStatus(status));
                 }
 
@@ -113,8 +126,60 @@ public sealed class SessionClientToolHandler : ISessionToolHandler
         }
         catch (SessionOperationException error)
         {
+            ReportFailureState(error.Code);
             SessionError sessionError = await CreateErrorAsync(error, observedStatus, cancellationToken).ConfigureAwait(false);
             return SessionToolResult.Failure(sessionError);
+        }
+    }
+
+    private void ReportStatusState(SessionStatus status)
+    {
+        try
+        {
+            ReportState(SessionStateNames.FromWireName(status.State));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // A status with an unknown state name is refused by the caller's validation layer; this
+            // observer must not turn that refusal into a second failure.
+            return;
+        }
+    }
+
+    private void ReportFailureState(SessionErrorCode code)
+    {
+        SessionState? state = code switch
+        {
+            SessionErrorCode.Blocked => SessionState.Blocked,
+            SessionErrorCode.Disconnected or SessionErrorCode.AgentDead => SessionState.Disconnected,
+            _ => null,
+        };
+
+        if (state is not null)
+        {
+            ReportState(state.Value);
+        }
+    }
+
+    private void ReportState(SessionState state)
+    {
+        if (_stateChanged is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _stateChanged(state);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The runtime-state observer is a reporting channel. Its failure must not replace the
+            // contract result the caller is waiting for, but it must not be silent either.
+            Console.Error.WriteLine(
+                "E_MANUAL_INTERVENTION A session state update failed ("
+                + error.GetType().Name
+                + ").");
         }
     }
 

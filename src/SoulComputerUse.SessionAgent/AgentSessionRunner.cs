@@ -120,13 +120,15 @@ public static class AgentSessionRunner
         AgentLog.Write("information", "shell.started");
 
         DesktopSurface surface = new();
-        GuardedDesktopSurface guarded = new(surface, new BlockedGuard());
+        BlockedGuard blockedGuard = new();
+        GuardedDesktopSurface guarded = new(surface, blockedGuard);
         DesktopSessionClient client = new(
             guarded,
             options.SessionId,
             detected.Tier,
             detected.RequireStrength(),
-            detected.HelloHint);
+            detected.HelloHint,
+            blockedGuard.Observe);
         SessionClientToolHandler handler = new(client);
         await using AgentPipeServer server = new(
             AgentPipeNames.ForSession(options.SessionId),

@@ -10,7 +10,9 @@ namespace SoulComputerUse.SessionAgent;
 
 /// <summary>
 /// The agent's view of its own desktop exposed through the shared session client surface. The state
-/// is <c>ready</c> because the agent only starts serving after the shell bootstrap succeeded.
+/// is <c>ready</c> when the desktop can receive input and <c>blocked</c> when the input desktop is
+/// locked, protected or non-interactive; the agent only starts serving after the shell bootstrap
+/// succeeded.
 /// </summary>
 public sealed class DesktopSessionClient : ISessionClient
 {
@@ -19,6 +21,7 @@ public sealed class DesktopSessionClient : ISessionClient
     private readonly AuthTier _authTier;
     private readonly GateStrength _gateStrength;
     private readonly string? _helloHint;
+    private readonly Func<DesktopAvailabilityVerdict> _availability;
 
     /// <summary>Creates one client over the child session's desktop surface.</summary>
     /// <param name="surface">The desktop surface this child session serves.</param>
@@ -30,16 +33,23 @@ public sealed class DesktopSessionClient : ISessionClient
     /// system-credential tier reports the hint, and its only defined value is the enumeration of
     /// section 5.1.
     /// </param>
-    /// <exception cref="ArgumentNullException">The surface is null.</exception>
+    /// <param name="availability">
+    /// Probes the child session's desktop for the status call. A blocked verdict is reported as the
+    /// contract's <c>blocked</c> state while screenshots stay available; it never reaches the input
+    /// path, which keeps its own guard.
+    /// </param>
+    /// <exception cref="ArgumentNullException">The surface or the availability probe is null.</exception>
     /// <exception cref="ArgumentException">The session id is empty, the tier is none, or the hint does not belong to the tier.</exception>
     public DesktopSessionClient(
         IDesktopSurface surface,
         string sessionId,
         AuthTier authTier,
         GateStrength gateStrength,
-        string? helloHint)
+        string? helloHint,
+        Func<DesktopAvailabilityVerdict> availability)
     {
         ArgumentNullException.ThrowIfNull(surface);
+        ArgumentNullException.ThrowIfNull(availability);
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             throw new ArgumentException("The session id must not be empty.", nameof(sessionId));
@@ -65,6 +75,7 @@ public sealed class DesktopSessionClient : ISessionClient
         _authTier = authTier;
         _gateStrength = gateStrength;
         _helloHint = helloHint;
+        _availability = availability;
     }
 
     /// <inheritdoc />
@@ -72,8 +83,12 @@ public sealed class DesktopSessionClient : ISessionClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         DesktopScreen screen = _surface.GetScreen();
+        DesktopAvailabilityVerdict verdict = _availability();
+        SessionState state = verdict == DesktopAvailabilityVerdict.Usable
+            ? SessionState.Ready
+            : SessionState.Blocked;
         SessionStatus status = new(
-            SessionStateNames.ToWireName(SessionState.Ready),
+            SessionStateNames.ToWireName(state),
             _sessionId,
             _authTier,
             _gateStrength,

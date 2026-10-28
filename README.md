@@ -116,7 +116,8 @@ MCP server 只是 owner 的客户端，不会自己持有会话；没有会话�
 
 ## CI 与发布
 
-- `.github/workflows/ci.yml`：push/PR 上恢复、Release 构建、跑契约测试；非 PR 运行会打包 `0.0.0-ci.<run>` 构建产物。
+- `.github/workflows/ci.yml`：push/PR 上恢复、Release 构建、跑契约测试，并运行一组不依赖交互桌面的真实
+  IPC/安全集成测试；非 PR 运行会打包 `0.0.0-ci.<run>` 构建产物。
 - `.github/workflows/release.yml`：推送 `v*` 标签（或在 Actions 里手动指定已存在的标签）时，重新构建、跑契约测试、生成 GitHub Release 并上传：
   - `SoulComputerUse-win-x64.zip`
   - `soul-computer-use-skill.zip`
