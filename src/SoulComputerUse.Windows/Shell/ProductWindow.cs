@@ -1042,7 +1042,15 @@ public sealed class ProductWindow : IDisposable
             return;
         }
 
-        _ = NativeMethods.DestroyWindow(handle);
+        // DestroyWindow sends WM_DESTROY to this window before it destroys the child windows, and a
+        // child's teardown may pump this thread's queue. A WM_QUIT posted from WM_DESTROY can then be
+        // drained before the message loop reads it, which leaves the process alive with no window.
+        // The signal is therefore repeated after every child is gone; WM_DESTROY keeps its own post so
+        // the Dispose path still ends the loop.
+        if (NativeMethods.DestroyWindow(handle))
+        {
+            NativeMethods.PostQuitMessage(0);
+        }
     }
 
     private void RequestRepaint()
