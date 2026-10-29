@@ -13,15 +13,15 @@ namespace SoulComputerUse.SessionAgent;
 
 /// <summary>
 /// Runs the child-session agent: identity gate, claim gate, window station gate, credential gate
-/// detection, shell bootstrap, then one secured pipe connection that serves the desktop tools. It
-/// returns a process exit code for every gate verdict.
+/// detection, then one secured pipe connection that serves the desktop tools. It returns a process
+/// exit code for every gate verdict.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The three self-exit gates of section 3.2 and the credential tier of section 7.2 are decided here,
-/// in that order, before the shell is started. Every gate fails closed: a fact that cannot be read
-/// ends the agent instead of being replaced by an assumption, because an agent that guessed its
-/// location or its gate would serve the wrong desktop under a false security claim.
+/// in that order, before the pipe serves a single call. Every gate fails closed: a fact that cannot
+/// be read ends the agent instead of being replaced by an assumption, because an agent that guessed
+/// its location or its gate would serve the wrong desktop under a false security claim.
 /// </para>
 /// <para>
 /// The credential tier is detected by this process, never taken from the command line. A launcher
@@ -44,7 +44,7 @@ public static class AgentSessionRunner
     /// <param name="helloFacts">The Windows Hello facts to detect the gate tier from.</param>
     /// <param name="cancellationToken">Cancels the run; an observed cancellation is the caller's.</param>
     /// <exception cref="SessionOperationException">The pipe handshake or protocol failed.</exception>
-    /// <exception cref="InvalidOperationException">A system gate, the tier detection or the shell bootstrap failed.</exception>
+    /// <exception cref="InvalidOperationException">A system gate or the tier detection failed.</exception>
     /// <exception cref="ArgumentException">A declared gate value contradicts the detected tier.</exception>
     public static async Task<int> RunAsync(
         AgentOptions options,
@@ -116,9 +116,9 @@ public static class AgentSessionRunner
             throw;
         }
 
-        ShellBootstrap.StartExplorer();
-        AgentLog.Write("information", "shell.started");
-
+        // The child session's desktop shell is already running: the Run entry that starts this agent
+        // is read by explorer itself at logon (see ChildSessionAgentBootstrap). Launching explorer.exe
+        // here would open a File Explorer window on every start.
         DesktopSurface surface = new();
         BlockedGuard blockedGuard = new();
         GuardedDesktopSurface guarded = new(surface, blockedGuard);

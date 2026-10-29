@@ -63,7 +63,7 @@ SoulComputerUse.SessionAgent.exe --scu-bootstrap --session <uuid> --nonce <32-he
 2. 认领闸：读取当前用户的 owner 记录；记录不存在时最多等待 25 秒；`subagentWtsSessionId = 0` 时视为“等待宿主通过管道认领”。
 3. 窗口站闸：必须是 `WinSta0\Default`。
 4. 门禁探测：Hello 已登记 → `hello-enrolled/strong`；否则有交互式登录令牌 → `system-credential/login`；否则 `none` 拒绝启动。探测失败按 fail-closed 处理。
-5. 启动 explorer，然后开始监听 agent 管道。
+5. 开始监听 agent 管道。不启动 explorer：子会话的桌面外壳由系统在登录时启动，代理本身就是被该外壳读取 `Run` 启动项拉起的。
 6. 30 秒内没有宿主完成 nonce 握手则退出。
 
 ## 4. Host 附加模式
