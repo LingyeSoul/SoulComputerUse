@@ -247,6 +247,9 @@ public static class SessionStartOrchestrator
             ElevationFailure.HelperFailed => new SessionStartRefusal(
                 SessionErrorCode.ChildSessionsDisabled,
                 SessionStartMessages.ChildSessionsDisabled),
+            ElevationFailure.IntegrityRefused => new SessionStartRefusal(
+                SessionErrorCode.ManualIntervention,
+                SessionStartMessages.HelperIntegrityFailed),
             _ => throw new ArgumentOutOfRangeException(nameof(failure), failure, "Unknown elevation failure."),
         };
     }

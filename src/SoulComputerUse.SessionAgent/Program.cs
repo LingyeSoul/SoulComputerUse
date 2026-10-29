@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
+using SoulComputerUse.Windows.Integrity;
 
 namespace SoulComputerUse.SessionAgent;
 
@@ -25,6 +26,15 @@ internal static class Program
     {
         // Windowless by design; this only restores standard error when a terminal started the process.
         AgentConsole.AttachToParentConsoleWhenPresent();
+
+        // A directly started agent never passes the launcher's integrity check, so it verifies its own file
+        // before it parses an argument or touches the machine.
+        if (!SelfIntegrity.IsAccepted(SelfIntegrity.Check()))
+        {
+            AgentLog.Write("critical", "gate.install_integrity");
+            Console.Error.WriteLine(SelfIntegrity.FailureMessage);
+            return AgentExitCode.InstallIntegrity;
+        }
 
         AgentOptions options;
         try

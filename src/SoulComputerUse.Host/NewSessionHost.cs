@@ -105,6 +105,11 @@ internal sealed class NewSessionHost : IDisposable
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
+            // The window is the only place the operator can log on, so a destroyed window means the
+            // operator abandoned the start rather than that this process failed. The fact has to be
+            // captured before the cleanup below and before Dispose(), which nulls the window.
+            bool operatorClosedWindow = _productWindow is not null && _productWindow.IsDestroyed;
+
             // A start that never reached ready must not leave its machine footprint behind: the child
             // session it created answers a later connection without asking for a logon, the start-up
             // entry it mounted would start an agent on the next logon of this account, and the ownership
@@ -117,6 +122,22 @@ internal sealed class NewSessionHost : IDisposable
             {
                 description += Environment.NewLine
                     + "E_MANUAL_INTERVENTION The failed start could not release every resource; the ownership record or the machine-wide child-session switch may remain.";
+            }
+
+            if (operatorClosedWindow)
+            {
+                // A modal error dialog would appear over a window the operator destroyed themselves, and
+                // an error would blame the process for the operator's own decision. The cleanup still ran,
+                // so the machine footprint is released, and the exit code reports an abandoned start
+                // rather than a failed one. A cleanup failure has no dialog left to report it to, so it
+                // goes to the error stream instead of being lost.
+                if (cleanupFailed)
+                {
+                    Console.Error.WriteLine(description);
+                }
+
+                Dispose();
+                return 0;
             }
 
             App.ShowStartupError(description);
@@ -272,7 +293,10 @@ internal sealed class NewSessionHost : IDisposable
         // Every wait in the start hands this clock over to the message pump, so the window keeps answering
         // while the phases block. A plain sleep anywhere on this thread would freeze the caption, the
         // remote desktop control and every click the operator makes while the session is being brought up.
-        PumpingWaitClock waitClock = new(() => _productWindow is null || _productWindow.IsDestroyed);
+        // The same probe also ends the logon wait itself: a pump that returns because the window is gone
+        // would otherwise be asked to wait again on every slice until the logon timeout expired.
+        Func<bool> productWindowClosed = () => _productWindow is null || _productWindow.IsDestroyed;
+        PumpingWaitClock waitClock = new(productWindowClosed);
         _afterLogon = new DeferredAfterLogon(
             capturing,
             result => new AfterLogonSegment(
@@ -309,7 +333,8 @@ internal sealed class NewSessionHost : IDisposable
                     LogonPollInterval,
                     LogonTimeout,
                     waitClock,
-                    _logonTracker)),
+                    _logonTracker,
+                    productWindowClosed)),
             _afterLogon,
             new PhaseStatusObserver(() => _productWindow, () => capturing.AuthTier));
 

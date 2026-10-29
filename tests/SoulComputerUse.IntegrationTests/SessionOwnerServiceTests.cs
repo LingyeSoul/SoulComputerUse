@@ -322,7 +322,86 @@ public sealed class SessionOwnerServiceTests
             Assert.IsTrue(again.IsHeld, "The released lock must be acquirable again.");
         }
 
+        Assert.ThrowsExactly<ObjectDisposedException>(
+            () => service.Transition(SessionState.Disconnected),
+            "A cleanly disposed owner must refuse further record writes.");
         AssertPipeRefusesConnection(_pipeName);
+    }
+
+    [TestMethod]
+    public async Task FailedDisposeKeepsTheOwnerNonWritableAndTheRecordUntouched()
+    {
+        RecordingSessionClient client = new(ReadyStatus(_sessionId));
+        SessionOwnerService service = CreateService(new SessionClientToolHandler(client));
+        service.Start();
+        service.Transition(SessionState.Connecting);
+        service.Transition(SessionState.Ready);
+        string recordPath = _store.RecordPath;
+        string recordBefore = File.ReadAllText(recordPath);
+
+        using (FileStream held = new(recordPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.IsTrue(held.CanRead, "The test must hold the record open so its deletion really fails.");
+
+            AggregateException error = await Assert.ThrowsExactlyAsync<AggregateException>(
+                () => service.DisposeAsync().AsTask().WaitAsync(CaseTimeout));
+
+            StringAssert.Contains(error.Message, "could not release every resource");
+            Assert.HasCount(1, error.InnerExceptions);
+
+            Assert.ThrowsExactly<ObjectDisposedException>(
+                () => service.Transition(SessionState.Disconnected),
+                "A failed disposal must leave the service unable to write a record whose lock is gone.");
+            Assert.ThrowsExactly<ObjectDisposedException>(
+                () => service.SetSubagentWtsSessionId(7),
+                "A failed disposal must leave every record write path closed.");
+        }
+
+        Assert.AreEqual(recordBefore, File.ReadAllText(recordPath), "A failed disposal must not rewrite the record.");
+        Assert.AreEqual(SessionState.Ready, _store.Read()!.State);
+        Assert.IsFalse(
+            SingleInstanceLock.IsHeldByAnyone(_lockName),
+            "The lock must have been released even though deleting the record failed.");
+
+        using (SingleInstanceLock again = SingleInstanceLock.Acquire(_lockName))
+        {
+            Assert.IsTrue(again.IsHeld, "The released lock must be acquirable again.");
+        }
+
+        AssertPipeRefusesConnection(_pipeName);
+    }
+
+    [TestMethod]
+    public async Task SecondDisposeAfterAPartialCleanupRunsWithoutWritingTheRecord()
+    {
+        RecordingSessionClient client = new(ReadyStatus(_sessionId));
+        SessionOwnerService service = CreateService(new SessionClientToolHandler(client));
+        service.Start();
+        service.Transition(SessionState.Connecting);
+        service.Transition(SessionState.Ready);
+        string recordPath = _store.RecordPath;
+        string recordBefore = File.ReadAllText(recordPath);
+
+        using (FileStream held = new(recordPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.IsTrue(held.CanRead, "The test must hold the record open so the first cleanup really fails.");
+
+            await Assert.ThrowsExactlyAsync<AggregateException>(
+                () => service.DisposeAsync().AsTask().WaitAsync(CaseTimeout));
+
+            // The pipe and the lock are already released, so the retry must reach the end of the
+            // cleanup instead of failing again on a step it no longer owns.
+            await service.DisposeAsync().AsTask().WaitAsync(CaseTimeout);
+        }
+
+        Assert.AreEqual(
+            recordBefore,
+            File.ReadAllText(recordPath),
+            "Neither disposal attempt may rewrite the ownership record.");
+        Assert.IsFalse(SingleInstanceLock.IsHeldByAnyone(_lockName));
+        Assert.ThrowsExactly<ObjectDisposedException>(
+            () => service.Transition(SessionState.Disconnected),
+            "The retry must leave the service disposed and unable to write the record.");
     }
 
     [TestMethod]

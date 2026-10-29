@@ -53,7 +53,7 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
     private readonly ISessionToolHandler _handler;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly object _gate = new();
-    private readonly List<Task> _connections = [];
+    private readonly HashSet<Task> _connections = [];
     private NamedPipeServerStream? _listeningPipe;
     private Task? _acceptLoop;
     private bool _started;
@@ -70,6 +70,22 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
 
     /// <summary>The pipe this server listens on.</summary>
     public string PipeName => _pipeName;
+
+    /// <summary>
+    /// The number of connections that are still running. Test-only: it exists so an integration test can
+    /// prove that a finished connection is removed from the tracking set instead of accumulating for the
+    /// life of the server.
+    /// </summary>
+    internal int LiveConnectionCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _connections.Count;
+            }
+        }
+    }
 
     /// <summary>
     /// Starts accepting connections and returns the accept loop. The loop runs until the caller's token
@@ -147,12 +163,29 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
             _connections.Clear();
         }
 
+        List<Exception> failures = [];
         foreach (Task connection in connections)
         {
-            await connection.ConfigureAwait(false);
+            try
+            {
+                await connection.ConfigureAwait(false);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // Every connection is awaited even when an earlier one failed, so a single fault cannot
+                // abandon the rest and leave the server torn down underneath them.
+                failures.Add(error);
+            }
         }
 
         _shutdown.Dispose();
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(
+                "One or more owner pipe connections failed while the server was shutting down.",
+                failures);
+        }
     }
 
     private async Task AcceptLoopAsync(NamedPipeServerStream first, CancellationToken cancellationToken)
@@ -193,6 +226,8 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
                 {
                     _connections.Add(connection);
                 }
+
+                _ = ForgetConnectionWhenCompleteAsync(connection);
             }
         }
         finally
@@ -201,6 +236,38 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
             {
                 ClearListeningPipe(pending);
                 await pending.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes one connection from the live set when it ends. The connection keeps being the awaited
+    /// task, so <see cref="DisposeAsync"/> still waits for anything that is still running; this only
+    /// stops a finished connection from being kept until the server shuts down.
+    /// </summary>
+    private async Task ForgetConnectionWhenCompleteAsync(Task connection)
+    {
+        try
+        {
+            await connection.ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The transport failures a connection can end with are already handled inside
+            // RunConnectionAsync. A fault that reaches here is an owner defect; it is reported so it
+            // cannot become an unobserved background fault. The detail stays out because it may name a
+            // path or an account. Dispose still reports a connection that is live when the server shuts
+            // down.
+            Console.Error.WriteLine(
+                "E_MANUAL_INTERVENTION An owner pipe connection failed unexpectedly ("
+                + error.GetType().Name
+                + ").");
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _connections.Remove(connection);
             }
         }
     }
@@ -297,44 +364,57 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         using SemaphoreSlim writeGate = new(1, 1);
         List<Task> requests = [];
 
-        while (!token.IsCancellationRequested)
+        try
         {
-            OwnerFrameReadResult read = await reader.ReadLineAsync(token).ConfigureAwait(false);
-            if (read.Status == OwnerFrameReadStatus.EndOfStream)
+            while (!token.IsCancellationRequested)
             {
-                break;
-            }
-
-            if (read.Status == OwnerFrameReadStatus.FrameTooLong)
-            {
-                // The line was refused while it was being read, so no request id can be recovered.
-                await TryWriteAsync(writer, writeGate, OwnerPipeRefusals.FrameTooLong(), token).ConfigureAwait(false);
-                return;
-            }
-
-            IpcFrameParseResult parsed = IpcFrameCodec.Parse(read.Line);
-            switch (parsed.Kind)
-            {
-                case IpcFrameKind.Request:
-                    requests.Add(HandleRequestAsync(parsed.Request!, writer, writeGate, token));
+                OwnerFrameReadResult read = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                if (read.Status == OwnerFrameReadStatus.EndOfStream)
+                {
                     break;
-                case IpcFrameKind.Invalid:
-                    await TryWriteAsync(
-                        writer,
-                        writeGate,
-                        IpcResponse.CreateFailure(parsed.RecoveredId ?? 0, IpcError.Protocol(parsed.ErrorMessage!)),
-                        token).ConfigureAwait(false);
+                }
+
+                if (read.Status == OwnerFrameReadStatus.FrameTooLong)
+                {
+                    // The line was refused while it was being read, so no request id can be recovered. The
+                    // refusal is written first, then every request that already started is allowed to finish
+                    // so the write gate and the stream are not disposed underneath a running handler.
+                    await TryWriteAsync(writer, writeGate, OwnerPipeRefusals.FrameTooLong(), token).ConfigureAwait(false);
+                    await Task.WhenAll(requests).ConfigureAwait(false);
                     return;
-                default:
-                    await TryWriteAsync(
-                        writer,
-                        writeGate,
-                        IpcResponse.CreateFailure(
-                            parsed.RecoveredId ?? 0,
-                            IpcError.Protocol("The owner pipe received a frame that is not a request.")),
-                        token).ConfigureAwait(false);
-                    return;
+                }
+
+                IpcFrameParseResult parsed = IpcFrameCodec.Parse(read.Line);
+                switch (parsed.Kind)
+                {
+                    case IpcFrameKind.Request:
+                        requests.Add(HandleRequestAsync(parsed.Request!, writer, writeGate, token));
+                        break;
+                    case IpcFrameKind.Invalid:
+                        await TryWriteAsync(
+                            writer,
+                            writeGate,
+                            IpcResponse.CreateFailure(parsed.RecoveredId ?? 0, IpcError.Protocol(parsed.ErrorMessage!)),
+                            token).ConfigureAwait(false);
+                        await Task.WhenAll(requests).ConfigureAwait(false);
+                        return;
+                    default:
+                        await TryWriteAsync(
+                            writer,
+                            writeGate,
+                            IpcResponse.CreateFailure(
+                                parsed.RecoveredId ?? 0,
+                                IpcError.Protocol("The owner pipe received a frame that is not a request.")),
+                            token).ConfigureAwait(false);
+                        await Task.WhenAll(requests).ConfigureAwait(false);
+                        return;
+                }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // The server is shutting down. The requests that already started are awaited below, before the
+            // stream and the write gate are disposed; leaving the loop early must not abandon them.
         }
 
         await Task.WhenAll(requests).ConfigureAwait(false);

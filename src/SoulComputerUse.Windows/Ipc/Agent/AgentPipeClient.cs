@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.Windows.Ipc.Agent;
 
@@ -301,7 +302,9 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
                 _stream = stream;
             }
 
-            StreamReader reader = new(stream, Utf8WithoutBom, detectEncodingFromByteOrderMarks: false, StreamBufferSize, leaveOpen: true);
+            // The reader enforces OwnerPipeLimits.MaximumFrameBytes while it reads, so a peer cannot
+            // grow this process with a frame that never ends.
+            OwnerFrameReader reader = new(stream);
             StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
             {
                 AutoFlush = false,
@@ -314,22 +317,22 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
+                await CloseAfterFailedHandshakeAsync(stream, writer).ConfigureAwait(false);
                 throw;
             }
             catch (SessionOperationException error)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
+                await CloseAfterFailedHandshakeAsync(stream, writer).ConfigureAwait(false);
                 throw Break(error);
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
+                await CloseAfterFailedHandshakeAsync(stream, writer).ConfigureAwait(false);
                 throw Break(AgentErrors.Disconnected(_pipeName));
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
-                await CloseAfterFailedHandshakeAsync(stream, reader, writer).ConfigureAwait(false);
+                await CloseAfterFailedHandshakeAsync(stream, writer).ConfigureAwait(false);
                 throw Break(AgentErrors.Protocol(
                     "The child-session agent handshake failed because the peer data could not be read: "
                     + error.GetType().Name
@@ -340,7 +343,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
             {
                 _writer = writer;
                 _lastReceivedTimestamp = Stopwatch.GetTimestamp();
-                _readerLoop = ReadLoopAsync(reader);
+                _readerLoop = ReadLoopAsync(reader, stream);
                 _heartbeatLoop = MonitorHeartbeatAsync();
             }
         }
@@ -352,10 +355,8 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
     private async Task CloseAfterFailedHandshakeAsync(
         NamedPipeClientStream stream,
-        StreamReader reader,
         StreamWriter writer)
     {
-        reader.Dispose();
         writer.Dispose();
         lock (_stateGate)
         {
@@ -370,7 +371,7 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
     private async Task HandshakeAsync(
         NamedPipeClientStream stream,
-        StreamReader reader,
+        OwnerFrameReader reader,
         StreamWriter writer,
         CancellationToken cancellationToken)
     {
@@ -388,13 +389,18 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
 
         _serverStartTimeUtc = serverStartTime;
 
-        string? helloLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken).ConfigureAwait(false);
-        if (helloLine is null)
+        OwnerFrameReadResult helloRead = await ReadHandshakeLineAsync(reader, cancellationToken).ConfigureAwait(false);
+        if (helloRead.Status == OwnerFrameReadStatus.FrameTooLong)
+        {
+            throw SessionIpcRules.Protocol(OwnerPipeLimits.ExceededMessage);
+        }
+
+        if (helloRead.Status == OwnerFrameReadStatus.EndOfStream)
         {
             throw AgentErrors.Disconnected(_pipeName);
         }
 
-        IpcFrameParseResult hello = IpcFrameCodec.Parse(helloLine);
+        IpcFrameParseResult hello = IpcFrameCodec.Parse(helloRead.Line);
         if (hello.Kind == IpcFrameKind.Invalid)
         {
             throw AgentErrors.Protocol(hello.ErrorMessage!);
@@ -410,13 +416,18 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         int ackId = Interlocked.Increment(ref _nextId);
         await WriteLineCoreAsync(writer, IpcFrameCodec.WriteRequest(AgentHandshake.CreateHelloAck(ackId)), cancellationToken).ConfigureAwait(false);
 
-        string? ackLine = await ReadLineWithHandshakeTimeoutAsync(reader, cancellationToken).ConfigureAwait(false);
-        if (ackLine is null)
+        OwnerFrameReadResult ackRead = await ReadHandshakeLineAsync(reader, cancellationToken).ConfigureAwait(false);
+        if (ackRead.Status == OwnerFrameReadStatus.FrameTooLong)
+        {
+            throw SessionIpcRules.Protocol(OwnerPipeLimits.ExceededMessage);
+        }
+
+        if (ackRead.Status == OwnerFrameReadStatus.EndOfStream)
         {
             throw AgentErrors.Disconnected(_pipeName);
         }
 
-        IpcFrameParseResult ack = IpcFrameCodec.Parse(ackLine);
+        IpcFrameParseResult ack = IpcFrameCodec.Parse(ackRead.Line);
         if (ack.Kind == IpcFrameKind.Invalid)
         {
             throw AgentErrors.Protocol(ack.ErrorMessage!);
@@ -441,35 +452,57 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         }
     }
 
-    private async Task<string?> ReadLineWithHandshakeTimeoutAsync(StreamReader reader, CancellationToken token)
+    /// <summary>Reads one handshake line under the contract handshake timeout.</summary>
+    /// <remarks>
+    /// The timeout cancels the read itself instead of abandoning it, so a peer that never terminates
+    /// its line cannot keep the read buffering bytes after the handshake has been given up. An aborted
+    /// read is reported as the timeout it was, whether the platform cancels it or fails it as IO.
+    /// </remarks>
+    /// <exception cref="SessionOperationException"><c>E_AGENT_TIMEOUT</c> when the timeout fired.</exception>
+    private async Task<OwnerFrameReadResult> ReadHandshakeLineAsync(OwnerFrameReader reader, CancellationToken token)
     {
+        using CancellationTokenSource handshake = CancellationTokenSource.CreateLinkedTokenSource(token);
+        handshake.CancelAfter(_timings.HandshakeTimeout);
         try
         {
-            return await reader.ReadLineAsync(token).AsTask().WaitAsync(_timings.HandshakeTimeout, token).ConfigureAwait(false);
+            return await reader.ReadLineAsync(handshake.Token).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch (Exception error) when (
+            !token.IsCancellationRequested
+            && handshake.IsCancellationRequested
+            && (error is OperationCanceledException or IOException))
         {
             throw AgentErrors.Timeout(
                 "The child-session agent did not complete the hello handshake within its contract timeout.");
         }
     }
 
-    private async Task ReadLoopAsync(StreamReader reader)
+    /// <summary>
+    /// Reads frames until the connection ends. The reader is the handshake reader, so bytes it already
+    /// buffered past the handshake are not lost.
+    /// </summary>
+    private async Task ReadLoopAsync(OwnerFrameReader reader, NamedPipeClientStream stream)
     {
         CancellationToken token = _lifetime.Token;
         SessionOperationException reason = AgentErrors.Disconnected(_pipeName);
+        bool connectionBroken = false;
         try
         {
             while (!token.IsCancellationRequested)
             {
-                string? line = await reader.ReadLineAsync(token).ConfigureAwait(false);
-                if (line is null)
+                OwnerFrameReadResult read = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                if (read.Status == OwnerFrameReadStatus.EndOfStream)
                 {
                     break;
                 }
 
+                if (read.Status == OwnerFrameReadStatus.FrameTooLong)
+                {
+                    throw SessionIpcRules.Protocol(OwnerPipeLimits.ExceededMessage);
+                }
+
                 Interlocked.Exchange(ref _lastReceivedTimestamp, Stopwatch.GetTimestamp());
-                IpcFrameParseResult parsed = IpcFrameCodec.Parse(line);
+                IpcFrameParseResult parsed = IpcFrameCodec.Parse(read.Line);
                 switch (parsed.Kind)
                 {
                     case IpcFrameKind.Response:
@@ -496,10 +529,19 @@ public sealed class AgentPipeClient : ISessionClient, IAsyncDisposable
         {
             reason = AgentErrors.Protocol(error.Message);
         }
+        catch (SessionOperationException error)
+        {
+            // The peer crossed the frame limit: the connection is closed instead of being read further.
+            reason = error;
+            connectionBroken = true;
+        }
         finally
         {
-            reader.Dispose();
             Break(reason);
+            if (connectionBroken)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 

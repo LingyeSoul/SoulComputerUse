@@ -13,6 +13,7 @@ using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Ipc;
 using SoulComputerUse.Windows.Ipc.Agent;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.IntegrationTests;
 
@@ -45,6 +46,8 @@ public sealed class AgentIpcTests
         0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
         0x42, 0x60, 0x82,
     ];
+
+    private static readonly string OversizedFrame = new string('a', OwnerPipeLimits.MaximumFrameBytes + 1) + "\n";
 
     private static string NewPipeName()
     {
@@ -443,6 +446,96 @@ public sealed class AgentIpcTests
     }
 
     [TestMethod]
+    public async Task OversizedHandshakeLineIsRefusedWithProtocolErrorAndClosesTheConnection()
+    {
+        string pipeName = NewPipeName();
+        string nonce = AgentNonce.Create();
+        AgentServerTimings timings = new(
+            handshakeTimeout: TimeSpan.FromSeconds(10),
+            heartbeatInterval: TimeSpan.FromHours(1));
+        await using AgentPipeServer server = new(pipeName, nonce, new StubAgentToolHandler(), timings);
+        Task run = server.RunAsync(CancellationToken.None);
+        await server.WaitUntilListeningAsync(CancellationToken.None).WaitAsync(CaseTimeout);
+
+        await using (RawAgentClient raw = await RawAgentClient.ConnectAsync(pipeName))
+        {
+            string? helloLine = await raw.ReadLineAsync();
+            Assert.IsNotNull(helloLine, "The agent must announce its hello before the host completes the handshake.");
+
+            await raw.WriteOversizedFrameAsync(OversizedFrame);
+
+            SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+                () => run.WaitAsync(CaseTimeout));
+            Assert.AreEqual(SessionErrorCode.IpcProtocol, error.Code);
+            Assert.AreEqual(OwnerPipeLimits.ExceededMessage, error.Message);
+            Assert.IsNull(await raw.ReadLineAsync(), "A handshake line over the frame limit ends the connection.");
+        }
+    }
+
+    [TestMethod]
+    public async Task OversizedRequestLineIsRefusedWithProtocolErrorAndClosesTheConnection()
+    {
+        string pipeName = NewPipeName();
+        string nonce = AgentNonce.Create();
+        await using AgentPipeServer server = new(pipeName, nonce, new StubAgentToolHandler(), QuietServerTimings());
+        Task run = server.RunAsync(CancellationToken.None);
+        await server.WaitUntilListeningAsync(CancellationToken.None).WaitAsync(CaseTimeout);
+
+        await using (RawAgentClient raw = await ConnectAndHandshakeAsync(pipeName))
+        {
+            await raw.WriteOversizedFrameAsync(OversizedFrame);
+
+            IpcResponse refused = await raw.ReadResponseAsync();
+            Assert.IsFalse(refused.Ok);
+            Assert.AreEqual(0, refused.Id, "No request id can be recovered from a refused line.");
+            Assert.AreEqual("E_IPC_PROTOCOL", refused.Error!.Code);
+            Assert.AreEqual(OwnerPipeLimits.ExceededMessage, refused.Error.Message);
+            Assert.IsNull(await raw.ReadLineAsync(), "A request line over the frame limit ends the connection.");
+        }
+
+        await run.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
+    public async Task OversizedHelloLineFailsTheClientWithProtocolError()
+    {
+        string pipeName = NewPipeName();
+        string nonce = AgentNonce.Create();
+        using CancellationTokenSource lifetime = new();
+        NamedPipeServerStream pipe = new(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        Task rawRun = WriteRawHelloAndWaitAsync(pipe, OversizedFrame, lifetime.Token);
+        try
+        {
+            await using AgentPipeClient client = new(
+                pipeName,
+                nonce,
+                ClientTimings(),
+                new WindowsAgentProcessProbe());
+
+            SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+                () => client.GetStatusAsync(CancellationToken.None).WaitAsync(CaseTimeout));
+
+            Assert.AreEqual(SessionErrorCode.IpcProtocol, error.Code);
+            Assert.AreEqual(OwnerPipeLimits.ExceededMessage, error.Message);
+            Assert.IsFalse(error.Retryable, "A frame over the limit is a protocol refusal, not a retryable condition.");
+        }
+        finally
+        {
+            lifetime.Cancel();
+            try
+            {
+                await rawRun.WaitAsync(CaseTimeout);
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+            {
+                // The raw server was still waiting for the client.
+            }
+
+            await pipe.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
     public async Task WrongVersionIsRefusedWithProtocolError()
     {
         string pipeName = NewPipeName();
@@ -793,7 +886,16 @@ public sealed class AgentIpcTests
 
             try
             {
-                await writer.WriteLineAsync(helloLine.AsMemory(), token);
+                try
+                {
+                    await writer.WriteLineAsync(helloLine.AsMemory(), token);
+                }
+                catch (IOException)
+                {
+                    // A hello over the frame limit is refused while it is still being written, so the
+                    // client can close its side first; the caller asserts that refusal on the client.
+                }
+
                 try
                 {
                     _ = await reader.ReadLineAsync(token);
@@ -807,8 +909,7 @@ public sealed class AgentIpcTests
             {
                 // The frame is already written because this writer auto-flushes, so the final flush
                 // on disposal races the client's close; a broken pipe here is the same expected close
-                // the read above tolerates. The write itself stays strict: a broken pipe there still
-                // fails the case.
+                // that the write and the read above tolerate.
                 try
                 {
                     writer.Dispose();
@@ -1120,6 +1221,23 @@ public sealed class AgentIpcTests
         public Task WriteLineAsync(string line)
         {
             return _writer.WriteLineAsync(line);
+        }
+
+        /// <summary>Writes one unterminated frame that crosses the agent frame limit.</summary>
+        /// <remarks>
+        /// The agent refuses the line while it is still being written and closes its side, so the
+        /// write can end on a broken pipe; the refusal itself is asserted by the caller.
+        /// </remarks>
+        public async Task WriteOversizedFrameAsync(string frame)
+        {
+            try
+            {
+                await _writer.WriteAsync(frame.AsMemory(), CancellationToken.None);
+            }
+            catch (IOException)
+            {
+                // The agent refused the line and closed the pipe before the write finished.
+            }
         }
 
         public async Task<string?> ReadLineAsync()

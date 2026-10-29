@@ -7,6 +7,7 @@ using SoulComputerUse.Windows.Hosting.Discovery;
 using SoulComputerUse.Windows.Hosting.Headless;
 using SoulComputerUse.Windows.Hosting.Launch;
 using SoulComputerUse.Windows.Hosting.Startup.Split;
+using SoulComputerUse.Windows.Integrity;
 using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Cli;
@@ -35,6 +36,14 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        // A directly started CLI never passes the launcher's integrity check, so it verifies its own file
+        // before it parses an argument or touches the machine.
+        if (!SelfIntegrity.IsAccepted(SelfIntegrity.Check()))
+        {
+            Console.Error.WriteLine($"E_MANUAL_INTERVENTION {SelfIntegrity.FailureMessage}");
+            return FailureExitCode;
+        }
+
         CliCommand? command = null;
         if (args.Length > 0)
         {

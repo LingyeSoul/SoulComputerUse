@@ -10,6 +10,7 @@ using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Discovery;
 using SoulComputerUse.Windows.Hosting.Startup.Split;
+using SoulComputerUse.Windows.Integrity;
 
 namespace SoulComputerUse.Windows.Hosting.Launch;
 
@@ -225,14 +226,27 @@ public sealed class HostProcessLauncher : IHostStarter
 
     private string ResolveHostExecutable()
     {
+        string executablePath;
         try
         {
-            return HostExecutablePath.Resolve(_applicationDirectory);
+            executablePath = HostExecutablePath.Resolve(_applicationDirectory);
         }
         catch (FileNotFoundException)
         {
             throw HostLaunchFailure(HostLaunchMessages.HostExecutableMissing);
         }
+
+        // The manifest is read from the application directory this start launches from, which is the
+        // program's own directory in production. A source or test build has no manifest and stays allowed.
+        ExecutableIntegrity integrity = InstallManifest.Verify(
+            executablePath,
+            Path.Combine(_applicationDirectory, InstallManifest.FileName));
+        if (integrity is not ExecutableIntegrity.Verified and not ExecutableIntegrity.NotInstalled)
+        {
+            throw HostLaunchFailure(HostLaunchMessages.HostExecutableIntegrityFailed);
+        }
+
+        return executablePath;
     }
 
     private static string FormatExitCode(int? exitCode)

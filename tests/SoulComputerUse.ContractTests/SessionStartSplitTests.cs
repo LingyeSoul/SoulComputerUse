@@ -641,6 +641,86 @@ public sealed class SessionStartSplitTests
     }
 
     [TestMethod]
+    public void AWaitStoppedBeforeTheFirstObservationIsRefusedAsAbandoned()
+    {
+        RecordingWaitClock clock = new();
+        int reads = 0;
+        SessionConnectionWaiter waiter = new(
+            () =>
+            {
+                reads++;
+                return 2;
+            },
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(500),
+            clock,
+            new ScriptedLogonEvidence(createdSessionId: 0, hasCreatedSession: false, []),
+            static () => true);
+
+        SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => waiter.Await());
+
+        Assert.AreEqual(SessionErrorCode.Disconnected, error.Code, error.Message);
+        Assert.AreEqual(
+            SessionStartSplitMessages.ConnectionAbandoned,
+            error.Message,
+            "The refusal must say that the operator abandoned the pending logon, not that the client dropped.");
+        Assert.AreEqual(0, reads, "A wait that is already stopped must not read the client state at all.");
+        Assert.AreEqual(0, clock.Waits, "A wait that is already stopped must not wait on the clock.");
+        CollectionAssert.Contains(
+            error.Data.Keys,
+            SessionConnectionWaiter.ObservedStatesDataKey,
+            "Every refusal carries the observed-state chain, even when the stop arrived before any observation.");
+        Assert.IsEmpty(waiter.ObservedStates, "The stopped wait observed nothing.");
+    }
+
+    [TestMethod]
+    public void AWaitStoppedAfterTheFirstObservationEndsAfterOneClockWait()
+    {
+        RecordingWaitClock clock = new();
+        Queue<int> remaining = new([3, 3, 3, 3, 3]);
+        bool observed = false;
+        SessionConnectionWaiter waiter = new(
+            () =>
+            {
+                observed = true;
+                return remaining.Dequeue();
+            },
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(500),
+            clock,
+            new ScriptedLogonEvidence(createdSessionId: 0, hasCreatedSession: false, []),
+            () => observed);
+
+        SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => waiter.Await());
+
+        Assert.AreEqual(SessionErrorCode.Disconnected, error.Code, error.Message);
+        Assert.AreEqual(SessionStartSplitMessages.ConnectionAbandoned, error.Message);
+        Assert.AreEqual(
+            1,
+            clock.Waits,
+            "The timeout allows five observations, so the stop must end the wait after one clock wait instead of polling them all.");
+        CollectionAssert.AreEqual(
+            new List<int> { 3 },
+            new List<int>(waiter.ObservedStates),
+            "Only the observation before the stop may have reached the client.");
+    }
+
+    [TestMethod]
+    public void TheWaiterNeedsAStopProbe()
+    {
+        RecordingWaitClock clock = new();
+
+        Assert.ThrowsExactly<ArgumentNullException>(
+            () => new SessionConnectionWaiter(
+                () => 1,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                clock,
+                new NoLogonEvidence(),
+                null!));
+    }
+
+    [TestMethod]
     public void AConnectedStateTheClientNeverProducesIsRefusedInsteadOfGuessed()
     {
         RecordingWaitClock clock = new();

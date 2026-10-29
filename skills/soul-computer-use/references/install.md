@@ -71,10 +71,25 @@ Stop on a mismatch. Do not run the archive.
 
 ## 4. Install
 
-Install to a stable per-user directory:
+### Automated path
+
+Run the script from a normal-privilege PowerShell prompt, replacing `<skill-dir>` with the directory that contains this skill. It downloads and verifies the release without administrator rights, then requests one UAC prompt; the elevated phase only re-verifies that payload and copies it into `%ProgramFiles%\SoulComputerUse`. Do not start it from an elevated shell: the download phase refuses that, so elevation is requested only for the copy.
 
 ```powershell
-$install = Join-Path $env:LOCALAPPDATA 'SoulComputerUse\app'
+pwsh -NoProfile -File <skill-dir>\scripts\install.ps1 `
+  -Repository LingyeSoul/SoulComputerUse `
+  -Version latest `
+  -Destination (Join-Path $env:ProgramFiles 'SoulComputerUse')
+```
+
+If post-copy verification or the CLI self-check fails, the installer removes the directory it just populated, so a retry is not refused as "destination is not empty". Declining the UAC prompt leaves the destination unchanged.
+
+### Manual path (fallback)
+
+Install to the machine-wide Program Files directory. Run this step in an elevated PowerShell: writing under `%ProgramFiles%` needs administrator rights.
+
+```powershell
+$install = Join-Path $env:ProgramFiles 'SoulComputerUse'
 if (Test-Path -LiteralPath $install) {
   if (Get-ChildItem -LiteralPath $install -Force) {
     throw "Remove the existing installation first: $install"
@@ -86,7 +101,7 @@ Expand-Archive -LiteralPath $zip -DestinationPath $install -Force
 Get-ChildItem -LiteralPath $install -Recurse -File | Unblock-File
 ```
 
-The directory must end up with all five executables together:
+The directory must end up with all five executables together, plus `install-manifest.json`:
 
 ```text
 SoulComputerUse.Host.exe
@@ -94,9 +109,14 @@ SoulComputerUse.SessionAgent.exe
 SoulComputerUse.ChildSessionsHelper.exe
 SoulComputerUse.Cli.exe
 SoulComputerUse.Mcp.exe
+install-manifest.json
 ```
 
 The host derives the agent and helper paths from its own directory. Splitting the files across directories, or replacing one with a copy from another build, makes the session fail.
+
+### Integrity manifest
+
+`install-manifest.json` lists the five executables with their SHA-256, the manifest version, and the product version. `scripts/install.ps1` verifies every entry after extraction and refuses to copy when the manifest is missing, declares an unsupported manifest version or algorithm, omits a required executable, lists a file that is absent, or reports a hash that does not match. The download phase performs that check before requesting elevation; the elevated phase repeats it on its payload before copying, then verifies the copied files again after writing them to `%ProgramFiles%\SoulComputerUse`. This is not a signature: it shows that the files match the manifest shipped in the same archive, not who built the release.
 
 Optional: make `scu` available in new terminals by adding the install directory to the user `PATH` through **System Properties → Environment Variables**. Do not edit the machine-wide `PATH` just for one user.
 
@@ -123,7 +143,7 @@ OpenCode (`opencode.json`):
   "mcp": {
     "soul-computer-use": {
       "type": "local",
-      "command": ["C:\\Users\\<you>\\AppData\\Local\\SoulComputerUse\\app\\SoulComputerUse.Mcp.exe"],
+      "command": ["C:\\Program Files\\SoulComputerUse\\SoulComputerUse.Mcp.exe"],
       "enabled": true
     }
   }
@@ -160,15 +180,15 @@ Then start a session through the product:
 Upgrade:
 
 1. Close the host through its window and confirm the end of the session.
-2. Replace the contents of the install directory with the new release.
+2. In an elevated PowerShell, replace the contents of `%ProgramFiles%\SoulComputerUse` with the new release.
 3. Run the `scu --help` smoke test again.
 
 Uninstall:
 
 1. Close the host through its window and confirm the end of the session.
-2. Remove the install directory.
+2. In an elevated PowerShell, remove the application directory `%ProgramFiles%\SoulComputerUse`.
 3. Remove the `soul-computer-use` MCP entry from the agent client.
-4. Remove `%LOCALAPPDATA%\SoulComputerUse` if no session record should remain.
+4. Remove the per-user state under `%LOCALAPPDATA%\SoulComputerUse` if no session record or diagnostic log should remain. This directory is not the application; it holds the ownership record and logs.
 
 ## Troubleshooting the install
 

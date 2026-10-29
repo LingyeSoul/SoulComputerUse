@@ -45,9 +45,33 @@ SoulComputerUse.ChildSessionsHelper.exe
 SoulComputerUse.Cli.exe
 SoulComputerUse.Mcp.exe
 LICENSE
+install-manifest.json
 ```
 
 `Host` 从自身目录推导代理和提权 helper 的路径，拆开文件会直接启动失败。
+
+## 完整性清单
+
+应用压缩包根目录包含 `install-manifest.json`，记录五个 exe 各自的 SHA-256：
+
+```json
+{
+  "manifestVersion": 1,
+  "productVersion": "1.2.3",
+  "algorithm": "SHA-256",
+  "files": {
+    "SoulComputerUse.ChildSessionsHelper.exe": "<sha256>",
+    "SoulComputerUse.Cli.exe": "<sha256>",
+    "SoulComputerUse.Host.exe": "<sha256>",
+    "SoulComputerUse.Mcp.exe": "<sha256>",
+    "SoulComputerUse.SessionAgent.exe": "<sha256>"
+  }
+}
+```
+
+安装脚本在解压后、复制前逐个校验；文件缺失、版本或算法不符合约定、缺少必需条目、哈希不一致都会拒绝安装。复制到 `%ProgramFiles%\SoulComputerUse` 后还会再校验一次。
+
+它不是签名：清单只能证明文件与清单一致，不能证明是谁构建了发布。只有 Authenticode 签名才能证明构建者身份。
 
 ## 本地打包
 
@@ -62,9 +86,10 @@ pwsh -NoProfile -File .\scripts\package-release.ps1 `
 1. 依次 publish `Host`、`Cli`、`Mcp` 到同一个临时目录；
 2. 校验五个必需 exe；
 3. 复制 `LICENSE`；
-4. 生成应用 zip 和 skill zip；
-5. 写入 `SHA256SUMS.txt`；
-6. 输出三个产物的绝对路径（JSON）。
+4. 写入 `install-manifest.json`（五个 exe 的 SHA-256）；
+5. 生成应用 zip 和 skill zip；
+6. 写入 `SHA256SUMS.txt`；
+7. 输出三个产物的路径（JSON）。
 
 ## 发布前检查
 

@@ -57,6 +57,14 @@ public static class SessionStartMessages
     public const string ChildSessionsDisabled =
         "The elevated helper ran but the system refused to enable child sessions, so the session is refused.";
 
+    /// <summary>
+    /// The explanation for an elevation helper that does not match the hash the installation manifest
+    /// records, so it was never started.
+    /// </summary>
+    public const string HelperIntegrityFailed =
+        "The elevation helper does not match the installation manifest, so it was not started. Reinstall the product "
+        + "to restore the files the installation delivered.";
+
     /// <summary>The explanation for an agent connection that did not succeed.</summary>
     /// <param name="code">The contract code the connector observed.</param>
     public static string AgentFailed(SessionErrorCode code)

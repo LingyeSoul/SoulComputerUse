@@ -388,6 +388,14 @@ public sealed class SessionOwnerService : IAsyncDisposable
     /// is idempotent. Every cleanup step is attempted even when an earlier one fails; the collected
     /// failures are thrown together instead of being swallowed.
     /// </summary>
+    /// <remarks>
+    /// A partial cleanup leaves the service non-writable rather than half-alive: once disposal has
+    /// begun, <see cref="Transition"/> and <see cref="SetSubagentWtsSessionId"/> keep throwing
+    /// <see cref="ObjectDisposedException"/>, so a record that failed to be deleted is never written
+    /// again while the lock is gone. The pipe, its lifetime and the lock handle are forgotten only
+    /// after their own release succeeded, so a second call skips what already worked and retries
+    /// what is still held.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         await _disposeGate.WaitAsync().ConfigureAwait(false);
@@ -428,6 +436,7 @@ public sealed class SessionOwnerService : IAsyncDisposable
                 }
             }
 
+            bool loopStopped = true;
             if (loop is not null)
             {
                 try
@@ -440,10 +449,12 @@ public sealed class SessionOwnerService : IAsyncDisposable
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
+                    loopStopped = false;
                     errors.Add(error);
                 }
             }
 
+            bool serverDisposed = true;
             if (server is not null)
             {
                 try
@@ -452,10 +463,12 @@ public sealed class SessionOwnerService : IAsyncDisposable
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
+                    serverDisposed = false;
                     errors.Add(error);
                 }
             }
 
+            bool lifetimeDisposed = true;
             if (lifetime is not null)
             {
                 try
@@ -464,10 +477,12 @@ public sealed class SessionOwnerService : IAsyncDisposable
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
+                    lifetimeDisposed = false;
                     errors.Add(error);
                 }
             }
 
+            bool lockDisposed = true;
             if (lockHandle is not null)
             {
                 try
@@ -485,27 +500,42 @@ public sealed class SessionOwnerService : IAsyncDisposable
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
+                    lockDisposed = false;
                     errors.Add(error);
                 }
             }
 
             lock (_gate)
             {
-                if (errors.Count == 0)
+                if (serverDisposed)
                 {
                     _server = null;
+                }
+
+                if (lifetimeDisposed)
+                {
                     _serverLifetime = null;
+                }
+
+                if (loopStopped)
+                {
                     _serverLoop = null;
+                }
+
+                if (lockDisposed)
+                {
                     _lock = null;
                     _started = false;
+                }
+
+                if (errors.Count == 0)
+                {
                     _disposing = false;
                     _disposed = true;
                 }
-                else
-                {
-                    // Leave the service visibly not-disposed so a later call can retry the cleanup.
-                    _disposing = false;
-                }
+
+                // A failed step leaves _disposing set, so the service stays non-writable even when
+                // the lock is already gone; the fields left set above are what a retry still owns.
             }
 
             if (errors.Count > 0)

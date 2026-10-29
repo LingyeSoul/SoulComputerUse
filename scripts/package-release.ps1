@@ -6,7 +6,8 @@ Builds the self-contained Windows x64 release archives and their checksums.
 
 .DESCRIPTION
 Publishes the host, CLI, and MCP entry points into one staging directory, verifies that the
-host's child-session agent and elevation helper are present, then creates:
+host's child-session agent and elevation helper are present, writes install-manifest.json
+with the SHA-256 of each required executable, then creates:
 
   SoulComputerUse-win-x64.zip
   soul-computer-use-skill.zip
@@ -95,6 +96,25 @@ try {
 
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $staging 'LICENSE') -Force
 
+    # The installer verifies this manifest before copying anything; the file names stay at the archive root.
+    $manifestName = 'install-manifest.json'
+    $manifestFiles = [ordered]@{}
+    foreach ($executable in $requiredExecutables) {
+        $executablePath = Join-Path $staging $executable
+        $manifestFiles[$executable] = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    $manifest = [ordered]@{
+        manifestVersion = 1
+        productVersion = $Version
+        algorithm = 'SHA-256'
+        files = $manifestFiles
+    }
+
+    $manifestPath = Join-Path $staging $manifestName
+    $manifestJson = $manifest | ConvertTo-Json -Depth 3
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding($false)))
+
     $appArchive = Join-Path $outputFull 'SoulComputerUse-win-x64.zip'
     if (Test-Path -LiteralPath $appArchive) {
         Remove-Item -LiteralPath $appArchive -Force
@@ -127,6 +147,8 @@ try {
         appArchive = $appArchive
         skillArchive = $skillArchive
         checksums = $checksumPath
+        # Archive-relative path; the manifest ships inside the application archive.
+        manifest = $manifestName
     } | ConvertTo-Json -Depth 3
 }
 finally {

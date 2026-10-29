@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using SoulComputerUse.Windows.Integrity;
 using SoulComputerUse.Windows.Native;
 
 namespace SoulComputerUse.Windows.ChildSessions;
@@ -18,6 +19,9 @@ public enum ElevationFailure
 
     /// <summary>The helper ran but the system refused the change.</summary>
     HelperFailed = 2,
+
+    /// <summary>The helper executable does not match the installation manifest, so it was not started.</summary>
+    IntegrityRefused = 3,
 }
 
 /// <summary>The outcome of asking the system to enable child sessions.</summary>
@@ -67,6 +71,11 @@ public static class ChildSessionsElevator
     }
 
     /// <summary>Starts the helper elevated with the enable verb and reports what happened.</summary>
+    /// <remarks>
+    /// The helper is verified against the installation manifest before the consent prompt is shown, so a
+    /// helper replaced after installation is refused without gaining administrator authority. A source or
+    /// test build has no manifest, which stays allowed.
+    /// </remarks>
     public static ElevationResult EnableChildSessions(string applicationDirectory, int timeoutMilliseconds)
     {
         if (timeoutMilliseconds <= 0)
@@ -78,6 +87,17 @@ public static class ChildSessionsElevator
         }
 
         string helperPath = ResolveHelperPath(applicationDirectory);
+
+        // The check runs before the STA thread exists, so a helper that fails it never reaches the consent
+        // prompt. The manifest sits beside the helper, which is the program's own directory in production.
+        ExecutableIntegrity integrity = InstallManifest.Verify(
+            helperPath,
+            Path.Combine(applicationDirectory, InstallManifest.FileName));
+        if (integrity is not ExecutableIntegrity.Verified and not ExecutableIntegrity.NotInstalled)
+        {
+            return new ElevationResult(false, ElevationFailure.IntegrityRefused, ErrorSuccess);
+        }
+
         using ManualResetEventSlim started = new(false);
         int helperExitCode = -1;
         int launchError = ErrorSuccess;

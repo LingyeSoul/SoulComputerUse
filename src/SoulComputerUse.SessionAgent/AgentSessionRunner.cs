@@ -278,4 +278,7 @@ public static class AgentExitCode
     /// nor an interactive logon, so section 7.2 forbids running.
     /// </summary>
     public const int AuthTierNone = 7;
+
+    /// <summary>The executable does not match the installation manifest, so the agent refused to start.</summary>
+    public const int InstallIntegrity = 8;
 }

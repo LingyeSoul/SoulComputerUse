@@ -22,11 +22,11 @@ Installing this skill only teaches an agent how to install and operate the produ
 Check for an existing install first:
 
 ```powershell
-$InstallRoot = Join-Path $env:LOCALAPPDATA 'SoulComputerUse\app'
+$InstallRoot = Join-Path $env:ProgramFiles 'SoulComputerUse'
 Test-Path (Join-Path $InstallRoot 'SoulComputerUse.Host.exe')
 ```
 
-If it is missing, install the latest release with the script in this skill's `scripts` directory:
+If it is missing, install the latest release with the script in this skill's `scripts` directory, from a normal-privilege PowerShell:
 
 ```powershell
 pwsh -NoProfile -File <skill-dir>\scripts\install.ps1 `
@@ -35,7 +35,9 @@ pwsh -NoProfile -File <skill-dir>\scripts\install.ps1 `
   -Destination $InstallRoot
 ```
 
-The script downloads the release asset and `SHA256SUMS.txt`, verifies the SHA-256 hash, expands the archive, and prints the installed paths as JSON. It never edits `PATH`, the registry, or an agent configuration.
+The script downloads and verifies the release in that normal-privilege shell, then requests a single UAC prompt; the elevated phase only re-verifies the payload and copies it into Program Files. It refuses to start the download phase in an elevated shell. If post-copy verification or the CLI self-check fails, it removes the partial installation so a retry is not blocked. Run `start` and the CLI commands from a normal-privilege terminal too, because `start` refuses an elevated caller.
+
+The script downloads the release asset and `SHA256SUMS.txt`, verifies the archive hash, expands the archive, verifies `install-manifest.json` against the extracted files and again against the installed copy, and prints the installed paths as JSON. It never edits `PATH`, the registry, or an agent configuration.
 
 If the release is unavailable, use `references/install.md` for the manual download and verification steps, or `references/build-from-source.md` to publish from source.
 

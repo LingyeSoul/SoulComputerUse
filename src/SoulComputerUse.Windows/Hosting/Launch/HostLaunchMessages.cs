@@ -31,6 +31,14 @@ public static class HostLaunchMessages
         + "session can be started. Reinstall the product or restore that executable next to this program.";
 
     /// <summary>
+    /// The explanation when the host executable does not match the hash the installation manifest records,
+    /// so the launcher refuses to start it.
+    /// </summary>
+    public const string HostExecutableIntegrityFailed =
+        "The host executable does not match the installation manifest, so it was not started. Reinstall the product "
+        + "to restore the files the installation delivered.";
+
+    /// <summary>
     /// The explanation when the operating system refused to create the host process, including a caller's job
     /// object that does not allow the host to break away and outlive the caller. It names the one fallback that
     /// remains when the refusal repeats: starting the host once by hand.

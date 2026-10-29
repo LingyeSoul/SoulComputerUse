@@ -222,7 +222,109 @@ public sealed class DesktopSurface : IDesktopSurface
         uint accepted = _sendInput.Send(inputs);
         if (accepted != (uint)inputs.Length)
         {
+            INPUT[] releases = BuildReleaseBatch(inputs, accepted);
+            if (releases.Length > 0)
+            {
+                _ = _sendInput.Send(releases);
+            }
+
             throw new SessionOperationException(SessionErrorCode.AgentError, "input-rejected", true);
         }
+    }
+
+    /// <summary>
+    /// Builds the best-effort release events for the prefix of a rejected batch the system already
+    /// accepted. Move, wheel and Unicode events leave no state behind and produce no release; a key
+    /// or button whose own release is inside the accepted prefix is not repeated.
+    /// </summary>
+    private static INPUT[] BuildReleaseBatch(INPUT[] inputs, uint accepted)
+    {
+        int count = (int)Math.Min(accepted, (uint)inputs.Length);
+        bool[] released = new bool[count];
+
+        for (int eventIndex = 0; eventIndex < count; eventIndex++)
+        {
+            for (int pressIndex = eventIndex - 1; pressIndex >= 0; pressIndex--)
+            {
+                if (!released[pressIndex] && IsReleaseOf(inputs[pressIndex], inputs[eventIndex]))
+                {
+                    released[pressIndex] = true;
+                    break;
+                }
+            }
+        }
+
+        List<INPUT> releases = [];
+        for (int pressIndex = count - 1; pressIndex >= 0; pressIndex--)
+        {
+            if (!released[pressIndex] && TryCreateRelease(inputs[pressIndex], out INPUT release))
+            {
+                releases.Add(release);
+            }
+        }
+
+        return releases.ToArray();
+    }
+
+    /// <summary>Tells whether one accepted event is the release of an earlier persistent press.</summary>
+    private static bool IsReleaseOf(INPUT press, INPUT candidate)
+    {
+        if (!TryCreateRelease(press, out INPUT release) || release.Type != candidate.Type)
+        {
+            return false;
+        }
+
+        if (release.Type == DesktopInputFlags.InputMouse)
+        {
+            return release.Data.Mouse.Flags == candidate.Data.Mouse.Flags;
+        }
+
+        return release.Data.Keyboard.Flags == candidate.Data.Keyboard.Flags
+            && release.Data.Keyboard.VirtualKey == candidate.Data.Keyboard.VirtualKey;
+    }
+
+    /// <summary>
+    /// Builds the release event of one persistent press, or reports that the event holds no state.
+    /// </summary>
+    private static bool TryCreateRelease(INPUT press, out INPUT release)
+    {
+        if (press.Type == DesktopInputFlags.InputMouse)
+        {
+            uint releaseFlags;
+            if ((press.Data.Mouse.Flags & DesktopInputFlags.MouseEventFLeftDown) != 0)
+            {
+                releaseFlags = DesktopInputFlags.MouseEventFLeftUp;
+            }
+            else if ((press.Data.Mouse.Flags & DesktopInputFlags.MouseEventFRightDown) != 0)
+            {
+                releaseFlags = DesktopInputFlags.MouseEventFRightUp;
+            }
+            else if ((press.Data.Mouse.Flags & DesktopInputFlags.MouseEventFMiddleDown) != 0)
+            {
+                releaseFlags = DesktopInputFlags.MouseEventFMiddleUp;
+            }
+            else
+            {
+                release = default;
+                return false;
+            }
+
+            release = press;
+            release.Data.Mouse.Flags = releaseFlags;
+            return true;
+        }
+
+        bool isHeldKey = press.Type == DesktopInputFlags.InputKeyboard
+            && (press.Data.Keyboard.Flags
+                & (DesktopInputFlags.KeyEventFKeyUp | DesktopInputFlags.KeyEventFUnicode)) == 0;
+        if (!isHeldKey)
+        {
+            release = default;
+            return false;
+        }
+
+        release = press;
+        release.Data.Keyboard.Flags = DesktopInputFlags.KeyEventFKeyUp;
+        return true;
     }
 }

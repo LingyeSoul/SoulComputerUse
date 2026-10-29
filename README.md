@@ -44,7 +44,7 @@ agent / 你
    │  MCP stdio 或 scu CLI
    ▼
 scu / MCP 客户端
-   │  本机命名管道（显式 DACL + 对端 SID 校验 + 一次性 nonce）
+   │  本机命名管道（owner 管道：显式 DACL + 对端 SID 校验；agent 管道另加一次性 nonce）
    ▼
 Host 产品窗口（显示子会话桌面；Windows 登录由本人完成）
    │
@@ -56,19 +56,35 @@ Host 产品窗口（显示子会话桌面；Windows 登录由本人完成）
 
 ## 快速开始
 
-前提：Windows 11 x64、同一个 Windows 账户；首次建立子会话需要一次管理员同意（`SoulComputerUse.ChildSessionsHelper.exe` 的 UAC 提示）。下面用 GitHub CLI 下载并解压，也可以从 [Releases](https://github.com/LingyeSoul/SoulComputerUse/releases/latest) 手动下载。
+前提：Windows 11 x64、同一个 Windows 账户；首次建立子会话需要一次管理员同意（`SoulComputerUse.ChildSessionsHelper.exe` 的 UAC 提示）。程序安装到 `%ProgramFiles%\SoulComputerUse`。推荐在**普通权限**终端运行安装脚本：它先在普通权限下下载并校验 Release，然后只为复制请求一次 UAC；复制后的校验或 CLI 自检失败会回滚刚写入的目录，不会留下半装目录。手动解压到 Program Files 仍需要管理员（提权）PowerShell；`start` 始终要回到普通权限终端。
 
 ```powershell
-# 1) 下载并解压到固定目录
+# 推荐：在普通权限终端运行，脚本自己请求一次 UAC 来复制
+pwsh -NoProfile -File .\skills\soul-computer-use\scripts\install.ps1 `
+  -Repository LingyeSoul/SoulComputerUse `
+  -Version latest `
+  -Destination (Join-Path $env:ProgramFiles 'SoulComputerUse')
+```
+
+脚本不可用时走手动路径：用 GitHub CLI 下载，再在管理员（提权）PowerShell 中解压到固定目录，也可以从 [Releases](https://github.com/LingyeSoul/SoulComputerUse/releases/latest) 手动下载。
+
+```powershell
+# 手动路径 1) 在管理员（提权）PowerShell 中下载并解压到固定目录
 gh release download --repo LingyeSoul/SoulComputerUse `
   --pattern "SoulComputerUse-win-x64.zip" `
   --pattern "SHA256SUMS.txt" `
   --dir "$env:USERPROFILE\Downloads\SoulComputerUse"
-$install = Join-Path $env:LOCALAPPDATA 'SoulComputerUse\app'
+$install = Join-Path $env:ProgramFiles 'SoulComputerUse'
+New-Item -ItemType Directory -Path $install -Force | Out-Null
 Expand-Archive -LiteralPath "$env:USERPROFILE\Downloads\SoulComputerUse\SoulComputerUse-win-x64.zip" `
   -DestinationPath $install -Force
+```
 
-# 2) 打开产品窗口：普通权限运行，拿到单实例锁就返回，不等登录
+手动解压后换回普通权限终端（提权窗口里的 `start` 会被拒绝）：
+
+```powershell
+# 2) 在普通权限终端重新设置路径，打开产品窗口：拿到单实例锁就返回，不等登录
+$install = Join-Path $env:ProgramFiles 'SoulComputerUse'
 & "$install\SoulComputerUse.Cli.exe" start
 
 # 3) 在窗口里由你本人完成 Windows 登录，然后
@@ -82,7 +98,7 @@ Expand-Archive -LiteralPath "$env:USERPROFILE\Downloads\SoulComputerUse\SoulComp
 Start-Process -FilePath "$install\SoulComputerUse.Host.exe" -ArgumentList '--new-session'
 ```
 
-把 MCP server 注册给 agent（`%LOCALAPPDATA%\SoulComputerUse\app\SoulComputerUse.Mcp.exe`）：
+把 MCP server 注册给 agent（`%ProgramFiles%\SoulComputerUse\SoulComputerUse.Mcp.exe`）：
 
 ```powershell
 claude mcp add --scope user soul-computer-use -- "$install\SoulComputerUse.Mcp.exe"
@@ -90,7 +106,7 @@ codex mcp add soul-computer-use -- "$install\SoulComputerUse.Mcp.exe"
 ```
 
 > [!IMPORTANT]
-> Release 产物未做代码签名。安装前请按 `SHA256SUMS.txt` 校验 SHA-256，不要为了绕过 SmartScreen 而关闭杀毒软件；完整手动步骤见 [`skills/soul-computer-use/references/install.md`](skills/soul-computer-use/references/install.md)。
+> Release 产物未做代码签名。安装前请按 `SHA256SUMS.txt` 校验 SHA-256，不要为了绕过 SmartScreen 而关闭杀毒软件。安装脚本还会校验压缩包根目录的 `install-manifest.json`，任一文件缺失或哈希不一致都会拒绝安装；完整手动步骤见 [`skills/soul-computer-use/references/install.md`](skills/soul-computer-use/references/install.md)。
 
 ## 其他安装方式
 
@@ -115,7 +131,7 @@ npx skills add https://github.com/LingyeSoul/SoulComputerUse/releases/latest/dow
 帮我安装并注册 SoulComputerUse
 ```
 
-skill 会调用 `skills/soul-computer-use/scripts/install.ps1`，从 Release 下载、校验、解压，并打印安装路径。安装 skill 本身不会安装程序。
+skill 会从普通权限终端调用其 `scripts/install.ps1`：先在普通权限下从 Release 下载并校验，然后请求一次 UAC 把已校验的 payload 复制到 Program Files；复制后的校验或 CLI 自检失败会回滚，最后打印安装路径 JSON。安装 skill 本身不会安装程序。
 
 </details>
 
@@ -158,7 +174,7 @@ MCP 工具：`get_status`、`screenshot`、`mouse_move`、`mouse_click`、`mouse
 
 - 程序没有密码输入框、自动登录、记住密码或凭据代输路径。
 - 子会话代理只在子会话内启动；在控制台会话命中身份闸会立即退出。
-- owner 管道带显式 DACL、对端 SID 校验和一次性 nonce，不监听网络。
+- owner 管道带显式 DACL 和对端 SID 校验，不监听网络；host 与子会话 agent 之间的 agent 管道另外带一次性 nonce。
 - `blocked`（UAC 安全桌面）和 `awaiting-credentials`（等待系统登录）下不接受输入类工具。
 - 子会话与宿主使用同一个 Windows 账户；账户不一致会在 IPC 握手中被拒绝。
 - 子会话不是安全沙箱：隔离的是桌面与输入焦点，文件与权限仍属于同一个账户。

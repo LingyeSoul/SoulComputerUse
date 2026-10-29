@@ -9,6 +9,7 @@ using SoulComputerUse.Windows.Hosting.Discovery;
 using SoulComputerUse.Windows.Hosting.Headless;
 using SoulComputerUse.Windows.Hosting.Launch;
 using SoulComputerUse.Windows.Hosting.Startup.Split;
+using SoulComputerUse.Windows.Integrity;
 using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.Mcp;
@@ -42,6 +43,15 @@ internal static class Program
 
     private static async Task<int> Main()
     {
+        // A directly started MCP adapter never passes the launcher's integrity check, so it verifies its own
+        // file before it serves a request. The refusal goes to standard error only, so standard output stays
+        // clean for JSON-RPC.
+        if (!SelfIntegrity.IsAccepted(SelfIntegrity.Check()))
+        {
+            Console.Error.WriteLine($"E_MANUAL_INTERVENTION {SelfIntegrity.FailureMessage}");
+            return FailureExitCode;
+        }
+
         try
         {
             // Section 3 allows a CLI or MCP process to become the session owner when the lock is free and

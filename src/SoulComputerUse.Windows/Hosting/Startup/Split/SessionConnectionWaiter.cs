@@ -30,6 +30,11 @@ namespace SoulComputerUse.Windows.Hosting.Startup.Split;
 /// test that supplies a clock returning at once.
 /// </para>
 /// <para>
+/// The caller's stop probe is checked before every observation. The product window is where the operator
+/// logs on, so a closed window makes the logon impossible; without the probe the wait would keep polling a
+/// window that no longer exists until the whole timeout had expired.
+/// </para>
+/// <para>
 /// Every failure is an explicit exception carrying the contract code, and no message carries a path, an
 /// account, a SID or a nonce. This type writes no log entries.
 /// </para>
@@ -37,6 +42,7 @@ namespace SoulComputerUse.Windows.Hosting.Startup.Split;
 public sealed class SessionConnectionWaiter
 {
     private readonly Func<int> _readConnectedState;
+    private readonly Func<bool> _stopRequested;
     private readonly TimeSpan _interval;
     private readonly TimeSpan _timeout;
     private readonly IWaitClock _clock;
@@ -65,7 +71,34 @@ public sealed class SessionConnectionWaiter
         TimeSpan timeout,
         IWaitClock clock,
         ILogonEvidence logonEvidence)
-        : this(readConnectedState, interval, timeout, clock, logonEvidence, TimeSpan.FromSeconds(10))
+        : this(readConnectedState, interval, timeout, clock, logonEvidence, static () => false)
+    {
+    }
+
+    /// <summary>
+    /// Creates one waiter that also ends the wait when the caller's stop probe reports true, with the
+    /// default logon grace period. The probe is what lets a caller whose window is gone abandon the wait
+    /// instead of polling the full timeout for a logon nobody can perform any more.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// The reader, the evidence, the clock or the stop probe is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The interval or the timeout is not positive.</exception>
+    public SessionConnectionWaiter(
+        Func<int> readConnectedState,
+        TimeSpan interval,
+        TimeSpan timeout,
+        IWaitClock clock,
+        ILogonEvidence logonEvidence,
+        Func<bool> stopRequested)
+        : this(
+            readConnectedState,
+            interval,
+            timeout,
+            clock,
+            logonEvidence,
+            stopRequested,
+            TimeSpan.FromSeconds(10))
     {
     }
 
@@ -85,10 +118,33 @@ public sealed class SessionConnectionWaiter
         IWaitClock clock,
         ILogonEvidence logonEvidence,
         TimeSpan logonGrace)
+        : this(readConnectedState, interval, timeout, clock, logonEvidence, static () => false, logonGrace)
+    {
+    }
+
+    /// <summary>
+    /// Creates one waiter over every input: the connected-state reader, the bounded wait, the logon
+    /// evidence, the stop probe and the logon grace.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// The reader, the evidence, the clock or the stop probe is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The interval, the timeout or the grace is not positive.
+    /// </exception>
+    public SessionConnectionWaiter(
+        Func<int> readConnectedState,
+        TimeSpan interval,
+        TimeSpan timeout,
+        IWaitClock clock,
+        ILogonEvidence logonEvidence,
+        Func<bool> stopRequested,
+        TimeSpan logonGrace)
     {
         ArgumentNullException.ThrowIfNull(readConnectedState);
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(logonEvidence);
+        ArgumentNullException.ThrowIfNull(stopRequested);
 
         if (interval <= TimeSpan.Zero)
         {
@@ -106,6 +162,7 @@ public sealed class SessionConnectionWaiter
         }
 
         _readConnectedState = readConnectedState;
+        _stopRequested = stopRequested;
         _interval = interval;
         _timeout = timeout;
         _clock = clock;
@@ -165,8 +222,9 @@ public sealed class SessionConnectionWaiter
     /// <summary>Waits until the client reports the connected state, and proves the logon was observed first.</summary>
     /// <exception cref="SessionStartException">
     /// The client was admitted without the logon screen (<see cref="SessionErrorCode.State"/>), dropped to
-    /// the disconnected state (<see cref="SessionErrorCode.Disconnected"/>), or never connected in time
-    /// (<see cref="SessionErrorCode.AgentTimeout"/>).
+    /// the disconnected state (<see cref="SessionErrorCode.Disconnected"/>), the caller's stop probe
+    /// reported that the wait must end (<see cref="SessionErrorCode.Disconnected"/>), or the client never
+    /// connected in time (<see cref="SessionErrorCode.AgentTimeout"/>).
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The client reported a state it never produces.</exception>
     public void Await()
@@ -176,6 +234,17 @@ public sealed class SessionConnectionWaiter
         int graceUsed = 0;
         for (int attempt = 0; attempt < attempts; attempt++)
         {
+            // Checked before the read: once the window that shows the logon is gone, the client state is
+            // the state of a dead control and would keep the same answer until the timeout ran out. The
+            // stop therefore ends the wait without reading anything more.
+            if (_stopRequested())
+            {
+                throw Refusal(
+                    SessionErrorCode.Disconnected,
+                    SessionStartSplitMessages.ConnectionAbandoned,
+                    ObservedStates);
+            }
+
             int rawValue = _readConnectedState();
             RecordObservation(rawValue);
             RdpConnectedState state = RdpStateMapping.FromRawValue(rawValue);

@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Ipc;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.IntegrationTests;
 
@@ -218,6 +219,147 @@ public sealed class IpcTransportTests
             IpcFrameParseResult served = IpcFrameCodec.Parse(await again.ReadLineAsync() ?? string.Empty);
             Assert.IsTrue(served.Response!.Ok, "A new connection must still be served after the refusal.");
         }
+
+        serverLifetime.Cancel();
+        await acceptLoop.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
+    public async Task AFinishedConnectionIsRemovedFromTheLiveConnectionSet()
+    {
+        string pipeName = NewPipeName();
+        await using NamedPipeSessionServer server = new(pipeName, new StubSessionToolHandler());
+        using CancellationTokenSource serverLifetime = new();
+        Task acceptLoop = server.RunAsync(serverLifetime.Token);
+
+        await using (NamedPipeSessionClient client = new(pipeName))
+        {
+            SessionStatus status = await client.GetStatusAsync(CancellationToken.None).WaitAsync(CaseTimeout);
+            Assert.AreEqual("ready", status.State);
+
+            for (int attempt = 0; attempt < 250 && server.LiveConnectionCount != 1; attempt++)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(20));
+            }
+
+            Assert.AreEqual(1, server.LiveConnectionCount, "An open connection must be tracked.");
+        }
+
+        for (int attempt = 0; attempt < 250 && server.LiveConnectionCount != 0; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+        }
+
+        Assert.AreEqual(
+            0,
+            server.LiveConnectionCount,
+            "A finished connection must be removed instead of accumulating for the life of the server.");
+
+        serverLifetime.Cancel();
+        await acceptLoop.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
+    public async Task AnInvalidFrameDoesNotDropTheAnswerOfAStartedRequest()
+    {
+        string pipeName = NewPipeName();
+        StubSessionToolHandler handler = new() { StatusDelay = TimeSpan.FromMilliseconds(400) };
+        await using NamedPipeSessionServer server = new(pipeName, handler);
+        using CancellationTokenSource serverLifetime = new();
+        Task acceptLoop = server.RunAsync(serverLifetime.Token);
+
+        await using (RawPipeClient raw = await RawPipeClient.ConnectAsync(pipeName))
+        {
+            await raw.WriteLineAsync("""{"v":1,"type":"request","id":21,"method":"get_status","params":{}}""");
+            await raw.WriteLineAsync("this is not json");
+
+            IpcFrameParseResult refused = IpcFrameCodec.Parse(await raw.ReadLineAsync() ?? string.Empty);
+            Assert.AreEqual(IpcFrameKind.Response, refused.Kind);
+            Assert.IsFalse(refused.Response!.Ok);
+            Assert.AreEqual("E_IPC_PROTOCOL", refused.Response.Error!.Code);
+
+            IpcFrameParseResult answered = IpcFrameCodec.Parse(await raw.ReadLineAsync() ?? string.Empty);
+            Assert.AreEqual(IpcFrameKind.Response, answered.Kind);
+            Assert.IsTrue(
+                answered.Response!.Ok,
+                "A request that already started must still be answered before the connection closes.");
+            Assert.AreEqual(21, answered.Response.Id);
+
+            Assert.IsNull(await raw.ReadLineAsync(), "The connection must close after the refusal and the answers.");
+        }
+
+        serverLifetime.Cancel();
+        await acceptLoop.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
+    public async Task AFrameOverTheLimitDoesNotDropTheAnswerOfAStartedRequest()
+    {
+        string pipeName = NewPipeName();
+        StubSessionToolHandler handler = new() { StatusDelay = TimeSpan.FromMilliseconds(400) };
+        await using NamedPipeSessionServer server = new(pipeName, handler);
+        using CancellationTokenSource serverLifetime = new();
+        Task acceptLoop = server.RunAsync(serverLifetime.Token);
+
+        string oversized = new('x', OwnerPipeLimits.MaximumFrameBytes + 1);
+        await using (RawPipeClient raw = await RawPipeClient.ConnectAsync(pipeName))
+        {
+            await raw.WriteLineAsync("""{"v":1,"type":"request","id":22,"method":"get_status","params":{}}""");
+            Task<bool> write = raw.TryWriteLineAsync(oversized);
+
+            IpcFrameParseResult refused = IpcFrameCodec.Parse(await raw.ReadLineAsync() ?? string.Empty);
+            Assert.AreEqual(IpcFrameKind.Response, refused.Kind);
+            Assert.IsFalse(refused.Response!.Ok);
+            Assert.AreEqual("E_IPC_PROTOCOL", refused.Response.Error!.Code);
+
+            IpcFrameParseResult answered = IpcFrameCodec.Parse(await raw.ReadLineAsync() ?? string.Empty);
+            Assert.AreEqual(IpcFrameKind.Response, answered.Kind);
+            Assert.IsTrue(
+                answered.Response!.Ok,
+                "A request that already started must still be answered before the connection closes.");
+            Assert.AreEqual(22, answered.Response.Id);
+
+            // Whether the tail of the oversized line fits the kernel buffer is not part of the contract;
+            // the task is observed so no exception goes unowned.
+            await write.WaitAsync(CaseTimeout);
+            Assert.IsNull(await raw.ReadLineAsync(), "The connection must close after the refusal and the answers.");
+        }
+
+        serverLifetime.Cancel();
+        await acceptLoop.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
+    public async Task DisposeWaitsForALiveConnectionAndToleratesOneEndedAbruptly()
+    {
+        string pipeName = NewPipeName();
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        StubSessionToolHandler handler = new() { StatusEntered = entered, StatusRelease = release };
+        await using NamedPipeSessionServer server = new(pipeName, handler);
+        using CancellationTokenSource serverLifetime = new();
+        Task acceptLoop = server.RunAsync(serverLifetime.Token);
+
+        await using NamedPipeSessionClient live = new(pipeName);
+        Task<SessionStatus> pending = live.GetStatusAsync(CancellationToken.None);
+        await entered.Task.WaitAsync(CaseTimeout);
+
+        // A second client connects and drops without a frame, so its connection ends abruptly while the
+        // first one is still being served.
+        await using (RawPipeClient abrupt = await RawPipeClient.ConnectAsync(pipeName))
+        {
+        }
+
+        ValueTask disposal = server.DisposeAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        Assert.IsFalse(disposal.IsCompleted, "Dispose must wait for the connection that is still running.");
+
+        release.SetResult();
+        await disposal.AsTask().WaitAsync(CaseTimeout);
+
+        SessionOperationException error = await Assert.ThrowsExactlyAsync<SessionOperationException>(
+            () => pending.WaitAsync(CaseTimeout));
+        Assert.AreEqual(SessionErrorCode.Disconnected, error.Code);
 
         serverLifetime.Cancel();
         await acceptLoop.WaitAsync(CaseTimeout);
@@ -452,6 +594,10 @@ public sealed class IpcTransportTests
 
         public TimeSpan StatusDelay { get; init; } = TimeSpan.Zero;
 
+        public TaskCompletionSource? StatusEntered { get; init; }
+
+        public TaskCompletionSource? StatusRelease { get; init; }
+
         public int CallCount => Volatile.Read(ref _callCount);
 
         public JsonElement ArgumentsFor(SessionTool tool)
@@ -474,6 +620,12 @@ public sealed class IpcTransportTests
 
             if (tool == SessionTool.GetStatus)
             {
+                StatusEntered?.TrySetResult();
+                if (StatusRelease is not null)
+                {
+                    await StatusRelease.Task.ConfigureAwait(false);
+                }
+
                 if (StatusDelay == Timeout.InfiniteTimeSpan)
                 {
                     await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -528,6 +680,20 @@ public sealed class IpcTransportTests
         public Task WriteLineAsync(string line)
         {
             return _writer.WriteLineAsync(line);
+        }
+
+        public async Task<bool> TryWriteLineAsync(string line)
+        {
+            try
+            {
+                await _writer.WriteLineAsync(line);
+                return true;
+            }
+            catch (Exception error) when (error is IOException or ObjectDisposedException)
+            {
+                // The owner refused the line and closed its side while the tail was still being written.
+                return false;
+            }
         }
 
         public async Task<string?> ReadLineAsync()

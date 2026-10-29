@@ -16,7 +16,8 @@ namespace SoulComputerUse.ContractTests;
 /// <summary>
 /// The launcher's decision table: an answering owner is idempotent success, a live starting owner is
 /// retryable, a silent held lock stays a hard refusal, both launch guards run before any process starts,
-/// and the wait ends only when the lock appears, the host exits, or thirty seconds pass.
+/// a host that does not match the installation manifest is never started, and the wait ends only when the
+/// lock appears, the host exits, or thirty seconds pass.
 /// </summary>
 /// <remarks>
 /// Every port is a fake, so no case takes a real lock, starts a real process, reads a real record or
@@ -138,6 +139,39 @@ public sealed class HostProcessLauncherTests
         StringAssert.Contains(error.Message, HostExecutablePath.FileName);
         Assert.DoesNotContain(fixture.ApplicationDirectory, error.Message, "The message must not carry an installation path.");
         Assert.AreEqual(0, fixture.Starter.StartCount);
+    }
+
+    [TestMethod]
+    public async Task AHostThatMatchesTheInstallationManifestStarts()
+    {
+        using LaunchFixture fixture = new();
+        fixture.ShipMatchingManifest();
+
+        HostStartOutcome outcome = await fixture.CreateLauncher().StartAsync(CancellationToken.None);
+
+        Assert.AreEqual(HostStartOutcome.Started, outcome);
+        Assert.AreEqual(1, fixture.Starter.StartCount, "A verified host must still be started.");
+        Assert.AreEqual(1, fixture.Clock.WaitCount);
+    }
+
+    [TestMethod]
+    public async Task AHostThatDoesNotMatchTheInstallationManifestIsNeverStarted()
+    {
+        using LaunchFixture fixture = new();
+        fixture.ShipManifestWithWrongHash();
+
+        SessionOperationException error = await AssertHostLaunchFailureAsync(
+            fixture.CreateLauncher(),
+            HostLaunchMessages.HostExecutableIntegrityFailed);
+
+        StringAssert.Contains(error.Message, "installation manifest");
+        StringAssert.Contains(error.Message, "Reinstall");
+        Assert.DoesNotContain(
+            fixture.ApplicationDirectory,
+            error.Message,
+            "The message must not carry an installation path.");
+        Assert.AreEqual(0, fixture.Starter.StartCount, "A host that fails the manifest check must never be started.");
+        Assert.AreEqual(0, fixture.Clock.WaitCount, "A refused start must not wait for a lock.");
     }
 
     [TestMethod]
@@ -351,6 +385,26 @@ public sealed class HostProcessLauncherTests
         internal void RemoveHostExecutable()
         {
             File.Delete(Path.Combine(_directory.Path, HostExecutablePath.FileName));
+        }
+
+        internal void ShipMatchingManifest()
+        {
+            ShipManifest(TestInstallManifest.Sha256Hex(Path.Combine(_directory.Path, HostExecutablePath.FileName)));
+        }
+
+        internal void ShipManifestWithWrongHash()
+        {
+            ShipManifest(new string('0', 64));
+        }
+
+        private void ShipManifest(string hash)
+        {
+            TestInstallManifest.Write(
+                _directory.Path,
+                1,
+                "SHA-256",
+                HostExecutablePath.FileName,
+                hash);
         }
 
         public void Dispose()

@@ -105,6 +105,6 @@ Read the screen size again after the session restarts, the display changes, or `
 
 - The product, CLI, MCP server, and agent never accept a credential. There is no password field, no auto-login, and no credential persistence.
 - The agent only runs inside the child session. It refuses to start in the console session.
-- The owner pipe is local-only, with an explicit DACL, peer SID checks, and a per-session nonce. There is no network listener.
+- The owner pipe is local-only, with an explicit DACL and peer SID checks. There is no network listener. The separate host-to-agent pipe adds a one-time nonce on top of the same DACL and peer SID checks.
 - Screenshots and typed text are sensitive. Do not put them in logs, issues, or a repository.
 - Do not use the product to bypass UAC, a lock screen, or an organization's policy.

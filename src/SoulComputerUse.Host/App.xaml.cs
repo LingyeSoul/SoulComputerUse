@@ -7,6 +7,7 @@ using System.Windows.Interop;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting;
+using SoulComputerUse.Windows.Integrity;
 using SoulComputerUse.Windows.Native;
 using SoulComputerUse.Windows.Shell;
 
@@ -29,6 +30,15 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // A host started directly by a double-click or Start-Process bypasses the launcher, so it verifies
+        // its own file before it reads any argument or causes any machine effect.
+        if (!SelfIntegrity.IsAccepted(SelfIntegrity.Check()))
+        {
+            ShowStartupError(SelfIntegrity.FailureMessage);
+            Shutdown(1);
+            return;
+        }
+
         base.OnStartup(e);
 
         if (Array.IndexOf(e.Args, SnapHitTestSpikeArgument) >= 0)

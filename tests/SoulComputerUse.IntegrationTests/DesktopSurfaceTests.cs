@@ -351,6 +351,80 @@ public sealed class DesktopSurfaceTests
         Assert.IsTrue(error.Retryable, "The contract marks E_AGENT_ERROR as retryable.");
     }
 
+    /// <summary>A combination rejected after the first keydown releases that key before the error.</summary>
+    [TestMethod]
+    public void PartiallyAcceptedKeyCombinationReleasesEveryHeldKey()
+    {
+        RecordingSendInput recorder = new() { AcceptedShortfall = 5 };
+        DesktopSurface surface = new(recorder);
+
+        SessionOperationException error = Assert.ThrowsExactly<SessionOperationException>(
+            () => surface.PressKeys(new SessionKey[] { SessionKey.Ctrl, SessionKey.Alt, SessionKey.Delete }));
+
+        Assert.AreEqual(SessionErrorCode.AgentError, error.Code);
+        Assert.AreEqual("input-rejected", error.Message);
+        Assert.IsTrue(error.Retryable, "A rejected batch stays retryable.");
+        Assert.HasCount(2, recorder.Batches, "The rejected batch must be followed by one release batch.");
+        Assert.HasCount(6, recorder.Batches[0], "The whole combination is still sent in one batch.");
+
+        INPUT[] releases = recorder.Batches[1];
+        Assert.HasCount(1, releases, "Only the Ctrl keydown reached the system.");
+        Assert.AreEqual(DesktopInputFlags.InputKeyboard, releases[0].Type);
+        Assert.AreEqual((ushort)0x11, releases[0].Data.Keyboard.VirtualKey);
+        Assert.AreEqual(DesktopInputFlags.KeyEventFKeyUp, releases[0].Data.Keyboard.Flags);
+    }
+
+    /// <summary>Two accepted keydowns are released in reverse press order.</summary>
+    [TestMethod]
+    public void PartiallyAcceptedKeyCombinationReleasesHeldKeysInReverseOrder()
+    {
+        RecordingSendInput recorder = new() { AcceptedShortfall = 2 };
+        DesktopSurface surface = new(recorder);
+
+        Assert.ThrowsExactly<SessionOperationException>(
+            () => surface.PressKeys(new SessionKey[] { SessionKey.Ctrl, SessionKey.Alt }));
+
+        Assert.HasCount(2, recorder.Batches, "The rejected batch must be followed by one release batch.");
+        INPUT[] releases = recorder.Batches[1];
+        Assert.HasCount(2, releases);
+        Assert.AreEqual((ushort)0x12, releases[0].Data.Keyboard.VirtualKey, "Alt went down last, so it is released first.");
+        Assert.AreEqual((ushort)0x11, releases[1].Data.Keyboard.VirtualKey, "Ctrl went down first, so it is released last.");
+        Assert.AreEqual(DesktopInputFlags.KeyEventFKeyUp, releases[0].Data.Keyboard.Flags);
+        Assert.AreEqual(DesktopInputFlags.KeyEventFKeyUp, releases[1].Data.Keyboard.Flags);
+    }
+
+    /// <summary>A click rejected between the button down and up releases that button before the error.</summary>
+    [TestMethod]
+    public void PartiallyAcceptedClickReleasesThePressedButton()
+    {
+        RecordingSendInput recorder = new() { AcceptedShortfall = 1 };
+        DesktopSurface surface = new(recorder);
+        DesktopScreen screen = surface.GetScreen();
+
+        SessionOperationException error = Assert.ThrowsExactly<SessionOperationException>(
+            () => surface.Click(screen.X, screen.Y, MouseButton.Left, 1));
+
+        Assert.AreEqual(SessionErrorCode.AgentError, error.Code);
+        Assert.HasCount(2, recorder.Batches, "The rejected batch must be followed by one release batch.");
+        Assert.HasCount(3, recorder.Batches[0], "The whole click is still sent in one batch.");
+
+        INPUT[] releases = recorder.Batches[1];
+        Assert.HasCount(1, releases, "One button up releases the held button.");
+        AssertMouseButton(releases[0], DesktopInputFlags.MouseEventFLeftUp);
+    }
+
+    /// <summary>A completely accepted batch must not be followed by a release batch.</summary>
+    [TestMethod]
+    public void FullyAcceptedBatchSendsNoReleaseBatch()
+    {
+        RecordingSendInput recorder = new();
+        DesktopSurface surface = new(recorder);
+
+        surface.PressKeys(new SessionKey[] { SessionKey.Ctrl, SessionKey.Alt });
+
+        Assert.HasCount(1, recorder.Batches, "A fully accepted batch stays one single sink call.");
+    }
+
     /// <summary>The native INPUT layout must match the x64 structure the injection adapter validates.</summary>
     [TestMethod]
     public void NativeInputLayoutMatchesTheX64Contract()

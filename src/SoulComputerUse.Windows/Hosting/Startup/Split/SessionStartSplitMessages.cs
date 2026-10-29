@@ -38,6 +38,13 @@ public static class SessionStartSplitMessages
     public const string ConnectionDisconnected =
         "The client reported the session as disconnected while the window waited for the operator to log on, so no session exists any more.";
 
+    /// <summary>
+    /// The explanation when the operator closed the product window while the logon was still pending, so
+    /// no logon can be reported any more and the start is abandoned instead of waited for.
+    /// </summary>
+    public const string ConnectionAbandoned =
+        "The operator closed the product window while the logon was still pending, so the start was abandoned.";
+
     /// <summary>The explanation for a connection that never reached the connected state in time.</summary>
     public const string ConnectionTimedOut =
         "The client did not report the session as connected within the allowed wait, so the operator may not have finished the Windows logon.";
