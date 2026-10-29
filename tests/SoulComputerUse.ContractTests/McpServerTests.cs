@@ -12,6 +12,7 @@ using SoulComputerUse.Core.Session;
 using SoulComputerUse.Mcp;
 using SoulComputerUse.Windows.Hosting.Discovery;
 using SoulComputerUse.Windows.Hosting.Launch;
+using SoulComputerUse.Windows.Ipc;
 
 namespace SoulComputerUse.ContractTests;
 
@@ -23,7 +24,7 @@ namespace SoulComputerUse.ContractTests;
 [TestClass]
 public sealed class McpServerTests
 {
-    private const int ScreenshotLimit = 5_242_880;
+    private const int ScreenshotLimit = SessionIpcRules.ScreenshotByteLimit;
 
     private static readonly string[] ScreenshotCallOrder = ["get_status", "screenshot"];
 

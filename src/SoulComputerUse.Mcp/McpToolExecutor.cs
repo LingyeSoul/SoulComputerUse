@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.Hosting.Discovery;
+using SoulComputerUse.Windows.Ipc;
 using SoulComputerUse.Windows.Hosting.Launch;
 
 namespace SoulComputerUse.Mcp;
@@ -26,9 +27,6 @@ namespace SoulComputerUse.Mcp;
 /// </remarks>
 internal sealed class McpToolExecutor
 {
-    /// <summary>The contract's per-frame ceiling, counted on the encoded PNG bytes (5 MiB).</summary>
-    private const int MaximumScreenshotBytes = 5 * 1024 * 1024;
-
     private readonly ISessionAccessor _sessions;
     private readonly IHostStarter _hostStarter;
     private readonly TextWriter _diagnostics;
@@ -121,11 +119,11 @@ internal sealed class McpToolExecutor
             case SessionTool.Screenshot:
             {
                 byte[] frame = await client.ScreenshotAsync(cancellationToken).ConfigureAwait(false);
-                if (frame.Length > MaximumScreenshotBytes)
+                if (frame.Length > SessionIpcRules.ScreenshotByteLimit)
                 {
                     throw new SessionOperationException(
                         SessionErrorCode.ScreenshotTooLarge,
-                        $"The encoded screenshot is {frame.Length} bytes, which exceeds the {MaximumScreenshotBytes}-byte limit.",
+                        $"The encoded screenshot is {frame.Length} bytes, which exceeds the {SessionIpcRules.ScreenshotByteLimit}-byte limit.",
                         false);
                 }
 

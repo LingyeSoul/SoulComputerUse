@@ -94,7 +94,7 @@ SoulComputerUse.Host.exe --new-session
 ## 5. 当前未完成项
 
 - 代理已在子会话内自行探测档位；但 Hello 探测的系统判定尚未接入，当前注入的 Hello 事实恒为「不可用」，因此实际只会落入 `system-credential` 或 `none`，不会自报 `hello-enrolled`、也不会给出 `helloNotEnrolled`。
-- owner 管道已使用显式 DACL（仅当前用户与 LocalSystem），并做双向对端 SID 校验与 8 MiB 单帧上限；仍没有 nonce、心跳与消息加密。
+- owner 管道已使用显式 DACL（仅当前用户与 LocalSystem），并做双向对端 SID 校验与 20 MiB 单帧上限；仍没有 nonce、心跳与消息加密。
 - agent 管道的跨账户 DACL、真实子会话、安全桌面/锁定桌面尚未实测。
 - `blocked` 与 `awaiting-credentials` 下的宿主截图（`Rdp/Capture`）尚未接入 owner 管道的 `screenshot`。
 - 真实注销子会话与真实关回开关均未在真机验证；测试只用假会话表与假开关。

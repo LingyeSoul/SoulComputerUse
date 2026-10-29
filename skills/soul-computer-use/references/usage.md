@@ -23,7 +23,7 @@ All tools take JSON objects with `additionalProperties: false`. Unknown fields a
 | Tool | Arguments | Result |
 |---|---|---|
 | `get_status` | none | `{state, sessionId, authTier, gateStrength, screen:{width,height}}`, plus optional `helloHint` |
-| `screenshot` | none | MCP image content, PNG, at most 5 MiB |
+| `screenshot` | none | MCP image content, PNG, at most 12 MiB |
 | `mouse_move` | `x`, `y` | `{ok:true}` |
 | `mouse_click` | `x`, `y`, `button` (`left`/`right`/`middle`), `count` (1–3) | `{ok:true}` |
 | `mouse_scroll` | `x`, `y`, `deltaX`, `deltaY` | `{ok:true}` |
@@ -87,7 +87,7 @@ Read the screen size again after the session restarts, the display changes, or `
 | `E_IPC_PEER` | Peer PID/SID or the handshake nonce did not match. | Stop; do not bypass the check. |
 | `E_INPUT_INVALID` | An argument was invalid. | Fix the named field. |
 | `E_COORD_OUT_OF_RANGE` | The point is outside the child desktop. | Re-read `screen` and retry within bounds. |
-| `E_SCREENSHOT_TOO_LARGE` | The encoded PNG exceeded 5 MiB. | Report it; do not raise the limit ad hoc. |
+| `E_SCREENSHOT_TOO_LARGE` | The encoded PNG exceeded 12 MiB. | Report it; the limit is raised only by changing the contract. |
 | `E_AGENT_ERROR` | The child-session action failed. | Read the enumerated reason (`uac-shield`, `window-gone`, `input-rejected`) and stop on security reasons. |
 | `E_HOST_LAUNCH_FAILED` | The host could not be launched from the caller's environment: missing host executable, elevated caller, caller off the interactive console session, refused process creation, host exited before taking the lock, or the wait limit. Not retryable. | Read the message, fix the named cause, and only then retry. An elevated agent needs the human to run `scu start` from a normal-privilege terminal. |
 

@@ -6,6 +6,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using SoulComputerUse.Core.Protocol;
 using SoulComputerUse.Core.Session;
+using SoulComputerUse.Windows.Ipc;
+using SoulComputerUse.Windows.Ipc.Security;
 
 namespace SoulComputerUse.ContractTests;
 
@@ -55,6 +57,21 @@ public sealed class SessionProtocolTests
             Assert.AreEqual("object", document.RootElement.GetProperty("type").GetString());
             Assert.IsGreaterThan(0, SessionToolCatalog.Describe(tool).Length, $"{tool} needs a description.");
         }
+    }
+
+    [TestMethod]
+    public void TheScreenshotLimitAlwaysFitsInsideOneOwnerFrame()
+    {
+        // Base64 turns every three bytes into four characters, so a contract-sized PNG must still
+        // leave room for the JSON envelope inside one frame; otherwise a valid screenshot would be
+        // refused by the pipe before the client ever sees it.
+        int encodedBytes = ((SessionIpcRules.ScreenshotByteLimit + 2) / 3) * 4;
+        const int envelopeHeadroom = 64 * 1024;
+
+        Assert.IsLessThan(
+            OwnerPipeLimits.MaximumFrameBytes,
+            encodedBytes + envelopeHeadroom,
+            $"A {SessionIpcRules.ScreenshotByteLimit}-byte PNG becomes {encodedBytes} base64 bytes, which does not fit inside the {OwnerPipeLimits.MaximumFrameBytes}-byte owner frame limit.");
     }
 
     [TestMethod]

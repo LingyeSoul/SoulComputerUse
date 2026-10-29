@@ -180,7 +180,7 @@
 
 ## 5. MCP 工具清单（JSON Schema）
 
-返回结构统一：成功为工具 result；失败为 `isError: true` + §2 错误对象文本。截图以 MCP image content 返回（`mimeType: "image/png"`，base64），上限以**编码后 PNG 字节数**计：单帧 **5 MiB**（5,242,880 字节），base64 膨胀由发送方承担不占额度，超限报 `E_SCREENSHOT_TOO_LARGE`。所有坐标为子会话**原生物理像素**，原点**左上**。
+返回结构统一：成功为工具 result；失败为 `isError: true` + §2 错误对象文本。截图以 MCP image content 返回（`mimeType: "image/png"`，base64），上限以**编码后 PNG 字节数**计：单帧 **12 MiB**（12,582,912 字节），base64 膨胀由发送方承担不占额度，超限报 `E_SCREENSHOT_TOO_LARGE`。所有坐标为子会话**原生物理像素**，原点**左上**。
 
 ### 5.1 `get_status`
 ```json
@@ -192,7 +192,7 @@
 ```json
 { "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false, "required": [] } }
 ```
-返回：image content（PNG，≤5 MiB）。
+返回：image content（PNG，≤12 MiB）。
 
 ### 5.3 `mouse_move`
 ```json

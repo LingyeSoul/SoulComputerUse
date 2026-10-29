@@ -17,8 +17,12 @@ public static class SessionIpcRules
     /// <summary>The contract's request timeout for <c>screenshot</c>, which is allowed longer.</summary>
     public static readonly TimeSpan ScreenshotTimeout = TimeSpan.FromSeconds(15);
 
-    /// <summary>The contract's limit on encoded PNG bytes, counted before base64 inflation.</summary>
-    public const int ScreenshotByteLimit = 5_242_880;
+    /// <summary>
+    /// The contract's limit on encoded PNG bytes, counted before base64 inflation. A 2560x1600
+    /// desktop encodes to about 5.6 MiB and a 4K desktop to about 12 MiB, so the limit sits at the
+    /// large desktop rather than at the smaller one.
+    /// </summary>
+    public const int ScreenshotByteLimit = 12_582_912;
 
     /// <summary>Returns the timeout the contract pins to one tool.</summary>
     public static TimeSpan TimeoutFor(SessionTool tool)
