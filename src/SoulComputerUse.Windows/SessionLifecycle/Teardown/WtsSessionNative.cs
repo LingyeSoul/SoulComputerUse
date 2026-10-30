@@ -51,6 +51,25 @@ internal static class WtsSessionNative
         int sessionId,
         [MarshalAs(UnmanagedType.Bool)] bool wait);
 
+    /// <summary>
+    /// <c>WTS_INFO_CLASS.WTSUserName</c>: the account name one session is logged on as. The constant is
+    /// named for what it answers rather than for the API's own spelling, because the product's sources
+    /// keep identity words out of member names.
+    /// </summary>
+    internal const int WtsInfoClassAccountName = 5;
+
+    /// <summary><c>WTS_CURRENT_SESSION</c>: the session the calling process itself runs in.</summary>
+    internal const int CurrentSession = -1;
+
+    [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool WTSQuerySessionInformationW(
+        nint server,
+        int sessionId,
+        int infoClass,
+        out nint buffer,
+        out int bytesReturned);
+
     [DllImport("kernel32.dll", EntryPoint = "WTSGetActiveConsoleSessionId")]
     internal static extern uint WTSGetActiveConsoleSessionId();
 }

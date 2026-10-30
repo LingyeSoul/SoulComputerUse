@@ -48,13 +48,19 @@ public sealed class ProductionSessionConnector : ISessionConnector
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// This gate is a re-check in front of the connection, so it holds no recorded child session id: the
+    /// startup sweep, which does hold the taken-over record's id, has already run. The account this
+    /// process runs as is part of the evidence, read from the session table, because a child session of
+    /// this product always runs as that account and nothing else may be signed off.
+    /// </remarks>
     public ConnectionGate PrepareGate()
     {
         int consoleSessionId = _sessionTable.ActiveConsoleSessionId();
         List<SessionCandidate> candidates = [];
         foreach (WtsSessionEntry entry in _sessionTable.Read())
         {
-            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State, entry.AccountName));
         }
 
         object? denyTsConnections = RdpExperimentPreconditions.ReadPolicyValue(
@@ -68,7 +74,8 @@ public sealed class ProductionSessionConnector : ISessionConnector
             consoleSessionId,
             childSessionsEnabled,
             denyTsConnections,
-            denyChildConnections);
+            denyChildConnections,
+            new LeftoverEvidence(0, _sessionTable.CurrentSessionAccountName()));
     }
 
     /// <inheritdoc />

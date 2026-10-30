@@ -85,7 +85,7 @@ SoulComputerUse.Host.exe --new-session
 
 - 不需要任何参数：会话 UUID 与绑定 nonce 由 Host 生成，不接受外部传入。
 - 三段时序：
-  1. **连接前**：取单实例锁 → 读/接管所有权记录 → 写 `starting` → 探测档位（`none` 拒绝）→ 遗留子会话 sweep → 子会话开关（必要时提权并回读）→ 写 alternate shell 属性。
+  1. **连接前**：取单实例锁 → 读/接管所有权记录（**捕获记录中的 `subagentWtsSessionId` 作为 sweep 的精确证据**，记录随后即删）→ 写 `starting` → 探测档位（`none` 拒绝）→ 遗留子会话 sweep（证据规则见 interface-contract.md §3.3：Active 会话不杀、id+同账户精确匹配、空站名+Disconnected+同账户实测形态、判定不出交人工）→ 子会话开关（必要时提权并回读）→ 写 alternate shell 属性。
   2. **连接**：唯一入口发起 RDP 连接；窗口显示 Windows 登录界面，标题栏进入 `awaiting-credentials`；等待期间持续泵消息，因此登录界面正常绘制。
   3. **登录后**：用户亲手登录 → 代理作为 alternate shell 启动 → 连接 agent 管道 → 写 `subagentWtsSessionId` → 启动 owner 管道 → `connecting` → `ready`。
 - 登录档不可跳过：控件若从 `connecting` 直跳 `connected`（`2 → 1`），判 `E_STATE` 并中止，不进入登录后段。

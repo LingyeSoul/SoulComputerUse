@@ -25,4 +25,12 @@ public interface IWtsSessionTable
     /// <summary>Returns the session currently attached to the interactive console.</summary>
     /// <exception cref="System.InvalidOperationException">No session is attached to the console.</exception>
     int ActiveConsoleSessionId();
+
+    /// <summary>
+    /// Reads the account name of the session this process itself runs in, which is the account the
+    /// leftover sweep's evidence compares every candidate against. A null return means the account name
+    /// is unknown, and no session may be proven to run as this account without it.
+    /// </summary>
+    /// <exception cref="System.InvalidOperationException">The system refused to answer for this process's own session.</exception>
+    string? CurrentSessionAccountName();
 }

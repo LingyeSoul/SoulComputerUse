@@ -5,9 +5,74 @@ using SoulComputerUse.Core.Session;
 namespace SoulComputerUse.Windows.Rdp;
 
 /// <summary>A session that may or may not be one of this product's child sessions.</summary>
-public sealed record SessionCandidate(int Id, string StationName, int State);
+/// <param name="AccountName">
+/// The account name the session is logged on as, or null when the system did not answer for this
+/// session. An empty string is a readable answer that names no account. The policy compares this name
+/// and never reports it.
+/// </param>
+public sealed record SessionCandidate(int Id, string StationName, int State, string? AccountName = null);
 
-/// <summary>What the pre-connection sweep decided.</summary>
+/// <summary>
+/// The proof a leftover sweep judges with: the child session id this product's own ownership record
+/// named when the current start took the record over, and the account name the sweeping process runs
+/// as.
+/// </summary>
+/// <remarks>
+/// A child session always runs as the account that started it, so a session logged on as any other
+/// account is not this product's leftover, whatever its station name looks like. That invariant is
+/// what the operator account name is here for.
+/// </remarks>
+public sealed record LeftoverEvidence
+{
+    /// <summary>Creates the evidence of one sweep.</summary>
+    /// <param name="RecordedChildSessionId">
+    /// The <c>subagentWtsSessionId</c> the taken-over ownership record named, or zero when no record
+    /// named a session.
+    /// </param>
+    /// <param name="OperatorAccountName">
+    /// The account name of the process that runs the sweep, or null when it could not be determined.
+    /// With no account name no session can be proven to run as this account, so nothing may be logged
+    /// off on shape alone.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">The recorded child session id is negative.</exception>
+    public LeftoverEvidence(int RecordedChildSessionId, string? OperatorAccountName)
+    {
+        if (RecordedChildSessionId < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(RecordedChildSessionId),
+                RecordedChildSessionId,
+                "The recorded child session id must not be negative.");
+        }
+
+        this.RecordedChildSessionId = RecordedChildSessionId;
+        this.OperatorAccountName = OperatorAccountName;
+    }
+
+    /// <summary>The child session id the taken-over ownership record named; zero names none.</summary>
+    public int RecordedChildSessionId { get; }
+
+    /// <summary>The account the sweep runs as; null when the name could not be determined.</summary>
+    public string? OperatorAccountName { get; }
+}
+
+/// <summary>What the policy proved about one session.</summary>
+public enum LeftoverProof
+{
+    /// <summary>Proven not to be a leftover of this product, so the run may go past it.</summary>
+    NotOurs = 0,
+
+    /// <summary>Proven to be a leftover of this product, so the sweep logs it off before connecting.</summary>
+    Ours = 1,
+
+    /// <summary>
+    /// Neither side is proven. The sweep may not log the session off and the run may not go past it,
+    /// because either act would guess, so the run stops for a human to decide.
+    /// </summary>
+    Unproven = 2,
+}
+
+/// <summary>What the pre-connection decision found.</summary>
 public enum LeftoverVerdict
 {
     /// <summary>Nothing of ours is left over, so a connection presents a fresh logon screen.</summary>
@@ -15,10 +80,19 @@ public enum LeftoverVerdict
 
     /// <summary>A leftover child session was found and must be logged off before connecting.</summary>
     LeftoverFound = 1,
+
+    /// <summary>
+    /// A session is logged on that is neither provably this product's leftover nor provably somebody
+    /// else's, so nothing may be logged off and nothing may connect; a human has to decide.
+    /// </summary>
+    UnprovenPresent = 2,
 }
 
 /// <summary>What the pre-connection decision found.</summary>
-public sealed record ConnectionGate(LeftoverVerdict LeftoverVerdict, IReadOnlyList<SessionCandidate> Leftovers);
+public sealed record ConnectionGate(
+    LeftoverVerdict LeftoverVerdict,
+    IReadOnlyList<SessionCandidate> Leftovers,
+    IReadOnlyList<SessionCandidate> Unproven);
 
 /// <summary>
 /// Decides, before anything connects, whether a child session of this product is already logged on.
@@ -28,14 +102,24 @@ public sealed record ConnectionGate(LeftoverVerdict LeftoverVerdict, IReadOnlyLi
 /// on answers a new connection without asking for a password, so the operator would silently receive a
 /// session nobody authenticated for. A leftover therefore has to be logged off first, and if it cannot
 /// be, the run must stop instead of connecting into an unguarded session.
+/// <para>
+/// A leftover is defined as a session whose client is gone, so its state is
+/// <see cref="DisconnectedState"/>. A session that is active has somebody in front of it, and this
+/// product's own client cannot be that somebody while the single-instance lock is held, so an active
+/// session is never this product's leftover, whatever its station name says.
+/// </para>
 /// </remarks>
 public static class LeftoverChildSessionPolicy
 {
     /// <summary>The service session, which must never be treated as one of ours.</summary>
     public const int ServiceSessionId = 0;
 
-    /// <summary>The station-name suffix a child session has while its client is attached.</summary>
-    private const string ChildStationSuffix = "#0";
+    /// <summary>
+    /// The prefix of an inbound remote-desktop station name: <c>RDP-Tcp#&lt;n&gt;</c>, where the whole
+    /// rest of the name is one number. Any other name that merely ends in <c>#0</c> is not an inbound
+    /// remote-desktop station at all.
+    /// </summary>
+    private const string InboundRdpStationPrefix = "RDP-Tcp#";
 
     /// <summary>
     /// <c>WTS_CONNECTSTATE_CLASS.WTSDisconnected</c>: the session still holds a logon but has no client
@@ -44,20 +128,23 @@ public static class LeftoverChildSessionPolicy
     public const int DisconnectedState = 4;
 
     /// <summary>
-    /// Finds child sessions of this product, and only those: a session is a candidate when it is not
-    /// the service session, not the operator's console session, and its station name has the child
-    /// session shape.
+    /// Finds the sessions that are proven to be child sessions of this product: not the service
+    /// session, not the operator's console session, and proven by evidence. Everything this method
+    /// returns will be logged off, so a session it must not decide about is absent here and present in
+    /// <see cref="FindUnproven"/> instead.
     /// </summary>
     public static IReadOnlyList<SessionCandidate> FindLeftovers(
         IReadOnlyList<SessionCandidate> sessions,
-        int activeConsoleSessionId)
+        int activeConsoleSessionId,
+        LeftoverEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(sessions);
+        ArgumentNullException.ThrowIfNull(evidence);
 
         List<SessionCandidate> leftovers = [];
         foreach (SessionCandidate session in sessions)
         {
-            if (IsOneOfOurs(session, activeConsoleSessionId))
+            if (Classify(session, activeConsoleSessionId, evidence) == LeftoverProof.Ours)
             {
                 leftovers.Add(session);
             }
@@ -66,7 +153,31 @@ public static class LeftoverChildSessionPolicy
         return leftovers;
     }
 
-    /// <summary>Returns the verdict for a sweep.</summary>
+    /// <summary>
+    /// Finds the sessions the evidence cannot decide about. The sweep logs nothing off while even one
+    /// is present, and the run refuses instead of guessing in either direction.
+    /// </summary>
+    public static IReadOnlyList<SessionCandidate> FindUnproven(
+        IReadOnlyList<SessionCandidate> sessions,
+        int activeConsoleSessionId,
+        LeftoverEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(sessions);
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        List<SessionCandidate> unproven = [];
+        foreach (SessionCandidate session in sessions)
+        {
+            if (Classify(session, activeConsoleSessionId, evidence) == LeftoverProof.Unproven)
+            {
+                unproven.Add(session);
+            }
+        }
+
+        return unproven;
+    }
+
+    /// <summary>Returns the verdict for the proven leftovers of a sweep.</summary>
     public static LeftoverVerdict Decide(IReadOnlyList<SessionCandidate> leftovers)
     {
         ArgumentNullException.ThrowIfNull(leftovers);
@@ -74,34 +185,194 @@ public static class LeftoverChildSessionPolicy
     }
 
     /// <summary>
-    /// Tells whether a session must be treated as a child session of this product. A child session's
-    /// station ends with <c>#0</c>, while the console's station is <c>Console</c> and the service
-    /// session's is <c>Services</c>. The console session id always wins over the station name: leaving
-    /// one stray session behind is far cheaper than signing the operator out.
+    /// Proves what one session is. Only positive proof makes a session ours, because a leftover that
+    /// is missed costs a fresh logon while a stranger's session that is logged off costs somebody's
+    /// unsaved work, and the second cannot be undone.
     /// </summary>
     /// <remarks>
-    /// A child session whose client is gone loses its station name: measured on the development machine
-    /// on 2026-10-26, a leftover child session reported an empty <c>WTSWinStationName</c> and the
-    /// disconnected state while its user name was still readable, and the sweep missed it because of the
-    /// name alone. Such a session is the very case this policy exists for, so a disconnected session
-    /// without a station name is one of ours as well. An active session without a station name is not:
-    /// that shape belongs to a session Windows has not finished creating.
+    /// <para>
+    /// The proofs, from strongest to weakest:
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// The taken-over ownership record names this exact session id, the session is disconnected, and its
+    /// account is the account this process runs as. The record is this product's own write and the
+    /// same-account invariant corroborates it, so together they survive even a reboot that reuses the
+    /// id for another session.
+    /// </item>
+    /// <item>
+    /// The session is disconnected, its station name is empty and its account is this process's own
+    /// account. Measured on the development machine on 2026-10-26, a child session whose client is gone
+    /// reports an empty station name and a readable account name while another local user's fast-user
+    /// -switch session does not run as this account.
+    /// </item>
+    /// </list>
+    /// <para>
+    /// Everything else is not ours, with one exception that is <see cref="LeftoverProof.Unproven"/>:
+    /// an inbound <c>RDP-Tcp#&lt;n&gt;</c> station that is disconnected while its account name is
+    /// readable. That shape belongs to a person who closed the remote-desktop window while staying
+    /// logged on, and the account name does not separate that person from this product's own
+    /// unmeasured leftover shape, so neither a logoff nor a connection may guess.
+    /// </para>
+    /// <para>
+    /// An account name the system did not answer for is treated as absent proof, never as a match: a
+    /// session of this account answers its own queries, so an unreadable name means the session is not
+    /// this product's, while a record that names the very session id keeps the case unproven rather
+    /// than dismissed. An active session is never proven to be ours at all, because a leftover's
+    /// client is gone by definition.
+    /// </para>
+    /// <para>
+    /// The account names are compared and never reported; the refusals that carry these decisions name
+    /// counts and session ids only.
+    /// </para>
     /// </remarks>
-    public static bool IsOneOfOurs(SessionCandidate session, int activeConsoleSessionId)
+    public static LeftoverProof Classify(SessionCandidate session, int activeConsoleSessionId, LeftoverEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(evidence);
 
         if (session.Id == ServiceSessionId || session.Id == activeConsoleSessionId)
+        {
+            return LeftoverProof.NotOurs;
+        }
+
+        // The precise evidence first: the record this product wrote names this exact session, and the
+        // same-account invariant says a session of ours always runs as this process's account. An active
+        // session is never a leftover, so even the record does not make it one.
+        if (evidence.RecordedChildSessionId > 0
+            && session.Id == evidence.RecordedChildSessionId
+            && session.State == DisconnectedState)
+        {
+            if (RunsAsOperatorAccount(session, evidence))
+            {
+                return LeftoverProof.Ours;
+            }
+
+            return session.AccountName is null ? LeftoverProof.Unproven : LeftoverProof.NotOurs;
+        }
+
+        if (session.State != DisconnectedState)
+        {
+            return LeftoverProof.NotOurs;
+        }
+
+        // The measured leftover shape: the client is gone, so the station name is gone too, and the
+        // account of a child session is the account that started it.
+        if (session.StationName.Length == 0)
+        {
+            return RunsAsOperatorAccount(session, evidence) ? LeftoverProof.Ours : LeftoverProof.NotOurs;
+        }
+
+        // A disconnected inbound remote-desktop station with a readable account name is the one shape
+        // the evidence cannot decide, so it is left for a human: neither the person's unsaved work nor
+        // the gate may be gambled on a guess.
+        if (IsInboundRdpStationName(session.StationName) && !string.IsNullOrEmpty(session.AccountName))
+        {
+            return LeftoverProof.Unproven;
+        }
+
+        return LeftoverProof.NotOurs;
+    }
+
+    /// <summary>
+    /// Tells whether a session is proven to be a child session of this product and may therefore be
+    /// logged off by the sweep; see <see cref="Classify"/> for the proofs and their order.
+    /// </summary>
+    public static bool IsOneOfOurs(SessionCandidate session, int activeConsoleSessionId, LeftoverEvidence evidence)
+    {
+        return Classify(session, activeConsoleSessionId, evidence) == LeftoverProof.Ours;
+    }
+
+    /// <summary>
+    /// Proves what one session is as the target of a teardown logoff: the entry the session table
+    /// returned for the id the teardown is about to use, judged at the last moment before the request.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This proof differs from <see cref="Classify"/> in one deliberate way: the entry's state is not
+    /// part of it. The sweep's rule that an active session is never this product's leftover holds because
+    /// the sweeping process holds the single-instance lock, so no second client of this product can
+    /// exist. A teardown runs while the very same lock is held and the tearing-down process may itself
+    /// still be the target's client, so the target may legitimately be active at the moment of the
+    /// request. The proof here is therefore the recorded id plus the same-account invariant alone: the
+    /// evidence names this exact session, and the session is logged on as the account this process runs
+    /// as, which a stranger's session that reused the freed id is not.
+    /// </para>
+    /// <para>
+    /// The same fail-closed standard as the sweep applies: the service session, the active console
+    /// session and any session the evidence does not name are never ours; an account name the system did
+    /// not answer for is absent proof, so the case stays <see cref="LeftoverProof.Unproven"/> rather than
+    /// dismissed; an account that was read but is not this process's own account — including an empty
+    /// name, which belongs to a session nobody logged on to — is not ours. A teardown target that cannot
+    /// be proven must not be logged off, because the request cannot be undone.
+    /// </para>
+    /// </remarks>
+    public static LeftoverProof ClassifyOwnedTarget(
+        SessionCandidate session,
+        int activeConsoleSessionId,
+        LeftoverEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        if (session.Id == ServiceSessionId || session.Id == activeConsoleSessionId || session.Id <= 0)
+        {
+            return LeftoverProof.NotOurs;
+        }
+
+        // Only the session the evidence names may be logged off at teardown: every other session, however
+        // much it looks like ours, needs a sweep with its own proof.
+        if (session.Id != evidence.RecordedChildSessionId)
+        {
+            return LeftoverProof.NotOurs;
+        }
+
+        if (session.AccountName is null)
+        {
+            return LeftoverProof.Unproven;
+        }
+
+        return RunsAsOperatorAccount(session, evidence) ? LeftoverProof.Ours : LeftoverProof.NotOurs;
+    }
+
+    /// <summary>
+    /// Tells whether one station name is a whole inbound remote-desktop name, <c>RDP-Tcp#&lt;n&gt;</c>:
+    /// the prefix followed by nothing but digits. A name that merely ends in <c>#0</c> is not matched,
+    /// because a suffix cannot tell the listener's numbering from a coincidence.
+    /// </summary>
+    private static bool IsInboundRdpStationName(string stationName)
+    {
+        if (!stationName.StartsWith(InboundRdpStationPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        if (session.StationName.EndsWith(ChildStationSuffix, StringComparison.OrdinalIgnoreCase))
+        ReadOnlySpan<char> number = stationName.AsSpan(InboundRdpStationPrefix.Length);
+        if (number.IsEmpty)
         {
-            return true;
+            return false;
         }
 
-        return session.StationName.Length == 0 && session.State == DisconnectedState;
+        foreach (char digit in number)
+        {
+            if (digit is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Tells whether the session's account was read and is this process's own account. A name that was
+    /// not answered for, an empty name and a missing operator name are all absent proof, never a match.
+    /// </summary>
+    private static bool RunsAsOperatorAccount(SessionCandidate session, LeftoverEvidence evidence)
+    {
+        return evidence.OperatorAccountName is { Length: > 0 }
+            && session.AccountName is { Length: > 0 }
+            && string.Equals(session.AccountName, evidence.OperatorAccountName, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -132,20 +403,28 @@ public static class ChildSessionConnection
         int activeConsoleSessionId,
         bool childSessionsEnabled,
         object? denyTsConnections,
-        object? denyChildConnections)
+        object? denyChildConnections,
+        LeftoverEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(sessions);
+        ArgumentNullException.ThrowIfNull(evidence);
 
         // The machine state first: without it a connection could take over the operator's console.
         RdpExperimentPreconditions.Check(childSessionsEnabled, denyTsConnections, denyChildConnections);
 
-        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(sessions, activeConsoleSessionId);
-        return new ConnectionGate(LeftoverChildSessionPolicy.Decide(leftovers), leftovers);
+        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(sessions, activeConsoleSessionId, evidence);
+        IReadOnlyList<SessionCandidate> unproven = LeftoverChildSessionPolicy.FindUnproven(sessions, activeConsoleSessionId, evidence);
+        LeftoverVerdict verdict = unproven.Count > 0
+            ? LeftoverVerdict.UnprovenPresent
+            : LeftoverChildSessionPolicy.Decide(leftovers);
+        return new ConnectionGate(verdict, leftovers, unproven);
     }
 
     /// <summary>
-    /// Refuses to go on when a leftover child session is still around. A leftover answers the connection
-    /// with its own logon, so the operator would never be asked to log on.
+    /// Refuses to go on when a leftover child session is still around, and when a session is around that
+    /// is neither provably a leftover nor provably somebody else's. A leftover answers the connection
+    /// with its own logon and an undecidable session may be a person's disconnected desktop, so one of
+    /// them must never be connected past and the other must never be signed off by a guess.
     /// </summary>
     public static void EnsureNoLeftover(ConnectionGate gate)
     {
@@ -156,8 +435,14 @@ public static class ChildSessionConnection
             return;
         }
 
+        if (gate.LeftoverVerdict == LeftoverVerdict.LeftoverFound)
+        {
+            throw LeftoverChildSessionPolicy.ManualInterventionRequired(
+                $"{gate.Leftovers.Count} child session(s) of this product are still logged on and could not be removed before connecting.");
+        }
+
         throw LeftoverChildSessionPolicy.ManualInterventionRequired(
-            $"{gate.Leftovers.Count} child session(s) of this product are still logged on and could not be removed before connecting.");
+            $"{gate.Unproven.Count} session(s) are logged on that are neither provably this product's leftovers nor provably another person's sessions, so nobody may be signed out and no connection may be opened until a human decides.");
     }
 
     /// <summary>

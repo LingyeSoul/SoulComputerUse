@@ -96,32 +96,55 @@ internal static class ConnectRun
 
     /// <summary>
     /// Logs off every child session of this product that is still around, so the connection that follows
-    /// is a fresh one and has to ask the operator to log on. A leftover that cannot be removed stops the
-    /// run: connecting anyway would hand over a session that skipped the operator's logon.
+    /// is a fresh one and has to ask the operator to log on. A session that is neither provably this
+    /// product's nor provably somebody else's stops the run before anything is logged off: connecting
+    /// anyway would hand over a session that skipped the operator's logon, and logging it off could
+    /// destroy a person's disconnected work.
     /// </summary>
     private static ConnectionGate SweepLeftoverChildSessions(string logPath)
     {
+        // The probe holds no ownership record, so it carries no recorded child session id; only the
+        // measured leftover shape and this account can prove anything here.
+        LeftoverEvidence evidence = new(0, SessionTable.CurrentAccountName());
         int consoleId = SessionTable.ActiveConsoleSessionId();
         List<SessionCandidate> candidates = [];
         foreach (SessionEntry entry in SessionTable.Read())
         {
-            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State, entry.AccountName));
         }
 
-        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(candidates, consoleId);
+        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(candidates, consoleId, evidence);
+        IReadOnlyList<SessionCandidate> unproven = LeftoverChildSessionPolicy.FindUnproven(candidates, consoleId, evidence);
+        if (unproven.Count > 0)
+        {
+            throw LeftoverChildSessionPolicy.ManualInterventionRequired(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{unproven.Count} session(s) are logged on that are neither provably this product's leftovers nor provably another person's sessions, so nothing may be logged off and no connection may be opened."));
+        }
+
         if (LeftoverChildSessionPolicy.Decide(leftovers) == LeftoverVerdict.NoLeftover)
         {
             RdpExperimentLog.Step(logPath, "leftover-child-session", true, "none, so the connection must ask the operator to log on");
-            return new ConnectionGate(LeftoverVerdict.NoLeftover, leftovers);
+            return new ConnectionGate(LeftoverVerdict.NoLeftover, leftovers, unproven);
         }
 
         foreach (SessionCandidate leftover in leftovers)
         {
+            // The console session id is re-read before every logoff request, the way the product sweep
+            // does: a fast user switch between two requests can move the operator's desktop onto a
+            // session this loop judged a moment earlier, and that session must never be logged off.
+            if (leftover.Id == SessionTable.ActiveConsoleSessionId())
+            {
+                throw LeftoverChildSessionPolicy.ManualInterventionRequired(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"session id {leftover.Id} became the active console session before its logoff request, so nothing more may be logged off."));
+            }
+
             RdpExperimentLog.Step(
                 logPath,
                 "leftover-child-session",
                 true,
-                string.Create(CultureInfo.InvariantCulture, $"id={leftover.Id} state={leftover.State} station={leftover.StationName}; logging it off before connecting"));
+                string.Create(CultureInfo.InvariantCulture, $"id={leftover.Id} state={leftover.State}; logging it off before connecting"));
             try
             {
                 SessionTable.LogOff(leftover.Id);
@@ -134,24 +157,24 @@ internal static class ConnectRun
 
         // Logging off is a request, not a result: the session has to actually disappear before a
         // connection can be trusted to present a fresh logon screen.
-        VerifyNoLeftoverRemains(logPath, consoleId);
+        VerifyNoLeftoverRemains(logPath, consoleId, evidence);
 
-        return new ConnectionGate(LeftoverVerdict.NoLeftover, leftovers);
+        return new ConnectionGate(LeftoverVerdict.NoLeftover, leftovers, unproven);
     }
 
     /// <summary>
     /// Re-reads the session table after the logoff requests and refuses to connect while any child
     /// session of this product is still present. An unconfirmed sweep is a bypassed gate.
     /// </summary>
-    private static void VerifyNoLeftoverRemains(string logPath, int consoleId)
+    private static void VerifyNoLeftoverRemains(string logPath, int consoleId, LeftoverEvidence evidence)
     {
         List<SessionCandidate> remaining = [];
         foreach (SessionEntry entry in SessionTable.Read())
         {
-            remaining.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+            remaining.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State, entry.AccountName));
         }
 
-        IReadOnlyList<SessionCandidate> stillThere = LeftoverChildSessionPolicy.FindLeftovers(remaining, consoleId);
+        IReadOnlyList<SessionCandidate> stillThere = LeftoverChildSessionPolicy.FindLeftovers(remaining, consoleId, evidence);
         if (LeftoverChildSessionPolicy.Decide(stillThere) == LeftoverVerdict.NoLeftover)
         {
             RdpExperimentLog.Step(logPath, "leftover-child-session-cleared", true, "the session table holds no child session any more");

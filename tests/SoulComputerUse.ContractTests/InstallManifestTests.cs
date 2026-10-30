@@ -20,7 +20,7 @@ public sealed class InstallManifestTests
     private const string ExecutableName = "SoulComputerUse.Host.exe";
     private const string OtherExecutableName = "SoulComputerUse.Cli.exe";
     private const string SupportedAlgorithm = "SHA-256";
-    private const int SupportedManifestVersion = 1;
+    private const int SupportedManifestVersion = TestInstallManifest.CurrentVersion;
     private const string WrongHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     [TestMethod]
@@ -147,18 +147,113 @@ public sealed class InstallManifestTests
     }
 
     [TestMethod]
-    public void AnUnsupportedManifestVersionIsManifestUnreadable()
+    public void AVersionOneManifestIsManifestUnreadable()
     {
         using TemporaryDirectory directory = new();
         string executablePath = WriteExecutable(directory.Path);
         TestInstallManifest.Write(
             directory.Path,
-            2,
+            1,
             SupportedAlgorithm,
             ExecutableName,
             WrongHash);
 
-        Assert.AreEqual(ExecutableIntegrity.ManifestUnreadable, Verify(executablePath, directory.Path));
+        Assert.AreEqual(
+            ExecutableIntegrity.ManifestUnreadable,
+            Verify(executablePath, directory.Path),
+            "Version 1 keyed only root file names; this build must refuse it instead of guessing at the older key format.");
+    }
+
+    [TestMethod]
+    public void AFileInASubdirectoryListedByRelativeKeyIsVerified()
+    {
+        using TemporaryDirectory directory = new();
+        string subdirectory = Path.Combine(directory.Path, "runtimes", "win-x64");
+        Directory.CreateDirectory(subdirectory);
+        string executablePath = Path.Combine(subdirectory, "native.dll");
+        File.WriteAllBytes(executablePath, [0x4D, 0x5A]);
+        TestInstallManifest.Write(
+            directory.Path,
+            SupportedManifestVersion,
+            SupportedAlgorithm,
+            "runtimes/win-x64/native.dll",
+            TestInstallManifest.Sha256Hex(executablePath));
+
+        Assert.AreEqual(ExecutableIntegrity.Verified, Verify(executablePath, directory.Path));
+    }
+
+    [TestMethod]
+    public void AnExecutableOutsideTheManifestDirectoryIsNotListed()
+    {
+        using TemporaryDirectory installDirectory = new();
+        using TemporaryDirectory otherDirectory = new();
+        string installedPath = WriteExecutable(installDirectory.Path);
+        string outsidePath = WriteExecutable(otherDirectory.Path);
+        TestInstallManifest.Write(
+            installDirectory.Path,
+            SupportedManifestVersion,
+            SupportedAlgorithm,
+            ExecutableName,
+            TestInstallManifest.Sha256Hex(installedPath));
+
+        Assert.AreEqual(
+            ExecutableIntegrity.NotListed,
+            Verify(outsidePath, installDirectory.Path),
+            "An executable outside the manifest's directory has no safe relative key, so it cannot be the file the manifest vouches for.");
+    }
+
+    [TestMethod]
+    public void AManifestKeyWithAParentHopIsManifestUnreadable()
+    {
+        using TemporaryDirectory directory = new();
+        string executablePath = WriteExecutable(directory.Path);
+        TestInstallManifest.Write(
+            directory.Path,
+            SupportedManifestVersion,
+            SupportedAlgorithm,
+            "../" + ExecutableName,
+            WrongHash);
+
+        Assert.AreEqual(
+            ExecutableIntegrity.ManifestUnreadable,
+            Verify(executablePath, directory.Path),
+            "A key that climbs out of the manifest directory is unsafe, and one unsafe key invalidates the document.");
+    }
+
+    [TestMethod]
+    public void AManifestKeyWithAnAbsolutePathIsManifestUnreadable()
+    {
+        using TemporaryDirectory directory = new();
+        string executablePath = WriteExecutable(directory.Path);
+        TestInstallManifest.Write(
+            directory.Path,
+            SupportedManifestVersion,
+            SupportedAlgorithm,
+            "C:/Windows/evil.dll",
+            WrongHash);
+
+        Assert.AreEqual(
+            ExecutableIntegrity.ManifestUnreadable,
+            Verify(executablePath, directory.Path),
+            "A drive-anchored key names a file outside the installation tree and must invalidate the manifest.");
+    }
+
+    [TestMethod]
+    public void AManifestKeyWithABackslashSeparatorIsManifestUnreadable()
+    {
+        using TemporaryDirectory directory = new();
+        string executablePath = WriteExecutable(directory.Path);
+        TestInstallManifest.Write(
+            directory.Path,
+            SupportedManifestVersion,
+            SupportedAlgorithm,
+            "runtimes\\win-x64\\native.dll",
+            WrongHash);
+
+        Assert.AreEqual(
+            ExecutableIntegrity.ManifestUnreadable,
+            Verify(executablePath, directory.Path),
+            "The '/' separator is the one canonical spelling; a '\\' key is not a key this producer could have written.");
     }
 
     [TestMethod]
@@ -217,6 +312,9 @@ public sealed class InstallManifestTests
 /// <summary>Writes installation manifests for the contract tests that need a real installed layout.</summary>
 internal static class TestInstallManifest
 {
+    /// <summary>The manifest version this build of the product writes and accepts.</summary>
+    internal const int CurrentVersion = 2;
+
     private const string SupportedProductVersion = "1.2.3";
 
     /// <summary>Returns the lowercase SHA-256 hash of one file, as the manifest records it.</summary>

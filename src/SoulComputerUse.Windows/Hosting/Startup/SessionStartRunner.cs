@@ -19,6 +19,11 @@ namespace SoulComputerUse.Windows.Hosting.Startup;
 /// </summary>
 /// <remarks>
 /// <para>
+/// A takeover restores first: when the taken-over record says the crashed owner turned the machine-wide
+/// child-session switch on, the switch is turned back off before the record that proves it is deleted,
+/// so a capability the crashed owner left behind never survives into a start that never opened it.
+/// </para>
+/// <para>
 /// This type never opens a remote desktop connection. Opening the child session belongs to
 /// <see cref="Rdp.ChildSessionConnection.Connect"/>, which the host's interface layer calls only after a
 /// start reports ready; a start that connected here would create a second connection path that could
@@ -49,6 +54,7 @@ public sealed class SessionStartRunner
     private readonly IAuthTierSource _authTierSource;
     private readonly ILeftoverSweep _leftoverSweep;
     private readonly IChildSessionsGate _childSessionsGate;
+    private readonly IChildSessionsSwitch _childSessionsSwitch;
     private readonly IAgentConnector _agentConnector;
     private readonly IOwnerPipeHost _ownerPipeHost;
     private readonly IProcessSessionLookup _processSessionLookup;
@@ -62,6 +68,7 @@ public sealed class SessionStartRunner
         IAuthTierSource authTierSource,
         ILeftoverSweep leftoverSweep,
         IChildSessionsGate childSessionsGate,
+        IChildSessionsSwitch childSessionsSwitch,
         IAgentConnector agentConnector,
         IOwnerPipeHost ownerPipeHost,
         IProcessSessionLookup processSessionLookup)
@@ -72,6 +79,7 @@ public sealed class SessionStartRunner
         ArgumentNullException.ThrowIfNull(authTierSource);
         ArgumentNullException.ThrowIfNull(leftoverSweep);
         ArgumentNullException.ThrowIfNull(childSessionsGate);
+        ArgumentNullException.ThrowIfNull(childSessionsSwitch);
         ArgumentNullException.ThrowIfNull(agentConnector);
         ArgumentNullException.ThrowIfNull(ownerPipeHost);
         ArgumentNullException.ThrowIfNull(processSessionLookup);
@@ -82,6 +90,7 @@ public sealed class SessionStartRunner
         _authTierSource = authTierSource;
         _leftoverSweep = leftoverSweep;
         _childSessionsGate = childSessionsGate;
+        _childSessionsSwitch = childSessionsSwitch;
         _agentConnector = agentConnector;
         _ownerPipeHost = ownerPipeHost;
         _processSessionLookup = processSessionLookup;
@@ -150,7 +159,16 @@ public sealed class SessionStartRunner
     /// </summary>
     private void RunPipeline(List<SessionStartStepResult> steps, StartState state)
     {
-        state.RecordStatus = ReadOwnerRecord(steps);
+        OwnerRecordRead ownerRecord = ReadOwnerRecord(steps);
+        state.RecordStatus = ownerRecord.Status;
+
+        // The taken-over record's child session id is the precise evidence the sweep judges with. It is
+        // captured here because the record is deleted before the sweep stage runs, and the sweep must
+        // still be able to name the session the previous owner left logged on. The record's switch flag
+        // is captured for the same reason: it is the only witness of a switch the crashed owner turned
+        // on and never turned off, and the takeover below restores it before the evidence is deleted.
+        state.RecordedChildSessionId = ownerRecord.Record?.SubagentWtsSessionId ?? 0;
+        state.RecordedChildSessionsOpenedByUs = ownerRecord.Record?.ChildSessionsOpenedByUs ?? false;
 
         while (true)
         {
@@ -206,6 +224,7 @@ public sealed class SessionStartRunner
     {
         if (plan.DeletesStaleRecord)
         {
+            RestoreSwitchTheCrashedOwnerLeftOn(steps, state);
             DeleteLeftoverRecord(steps);
             state.RecordStatus = OwnerRecordStatus.Absent;
         }
@@ -252,7 +271,7 @@ public sealed class SessionStartRunner
         Exception? sweepError = null;
         try
         {
-            sweep = LeftoverSweepOutcome.Completed(_leftoverSweep.Sweep());
+            sweep = LeftoverSweepOutcome.Completed(_leftoverSweep.Sweep(state.RecordedChildSessionId));
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -488,7 +507,7 @@ public sealed class SessionStartRunner
         return attempt;
     }
 
-    private OwnerRecordStatus ReadOwnerRecord(List<SessionStartStepResult> steps)
+    private OwnerRecordRead ReadOwnerRecord(List<SessionStartStepResult> steps)
     {
         OwnerRecordRead record;
         try
@@ -506,7 +525,7 @@ public sealed class SessionStartRunner
         }
 
         steps.Add(Succeeded(SessionStartStage.ReadOwnerRecord));
-        return record.Status;
+        return record;
     }
 
     private void DeleteLeftoverRecord(List<SessionStartStepResult> steps)
@@ -526,6 +545,72 @@ public sealed class SessionStartRunner
         }
 
         steps.Add(Succeeded(SessionStartStage.TakeOverRecord));
+    }
+
+    /// <summary>
+    /// Restores the machine-wide child-session switch a crashed owner left on, before the record that
+    /// proves it is deleted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A process that dies between turning the switch on and its own teardown leaves no other trace: the
+    /// next start probes the switch as already on, records that it did not open it, and never restores
+    /// it, so the machine-wide capability would stay on for ever. The taken-over record is the only
+    /// witness of who turned it on, so the restore runs here, while the record still exists, and a
+    /// failed restore keeps the record on disk for the next start to try again.
+    /// </para>
+    /// <para>
+    /// The record is this product's own write, so when it says the previous owner opened the switch and
+    /// the machine still reports the switch as on, the switch is restored to off even though the crashed
+    /// owner cannot be asked: a stranger who also turned it on in the meantime cannot be told apart, and
+    /// the record in hand outweighs that guess. A switch that already reads off was restored by somebody
+    /// else, and a record that does not name the switch is not this start's business, so neither is
+    /// touched. The stage runs only after the single-instance lock is held, so no second start can
+    /// restore the same switch concurrently, and a restore that fails refuses the start instead of being
+    /// swallowed, because a machine handed over with an unowned capability is exactly the state the
+    /// takeover rules exist to prevent.
+    /// </para>
+    /// </remarks>
+    private void RestoreSwitchTheCrashedOwnerLeftOn(List<SessionStartStepResult> steps, StartState state)
+    {
+        if (!state.RecordedChildSessionsOpenedByUs)
+        {
+            return;
+        }
+
+        bool enabled;
+        try
+        {
+            enabled = _childSessionsGate.IsEnabled();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            throw StageFailure(
+                SessionStartStage.TakeOverRecord,
+                SessionErrorCode.ManualIntervention,
+                SessionStartMessages.ChildSessionsProbeFailed,
+                steps,
+                error);
+        }
+
+        if (!enabled)
+        {
+            return;
+        }
+
+        try
+        {
+            _childSessionsSwitch.Restore();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            throw StageFailure(
+                SessionStartStage.TakeOverRecord,
+                SessionErrorCode.ManualIntervention,
+                SessionStartMessages.SwitchRestoreOnTakeOverFailed,
+                steps,
+                error);
+        }
     }
 
     private int ReadAgentSession(List<SessionStartStepResult> steps, int agentProcessId)
@@ -705,6 +790,17 @@ public sealed class SessionStartRunner
         internal IDisposable LockHandle { get; }
 
         internal OwnerRecordStatus RecordStatus { get; set; }
+
+        /// <summary>
+        /// The child session id the taken-over ownership record named; zero when no record named one.
+        /// </summary>
+        internal int RecordedChildSessionId { get; set; }
+
+        /// <summary>
+        /// Whether the taken-over ownership record said the previous owner turned the machine-wide
+        /// child-session switch on; false when no record said so.
+        /// </summary>
+        internal bool RecordedChildSessionsOpenedByUs { get; set; }
 
         internal AuthTier? AuthTier { get; set; }
 

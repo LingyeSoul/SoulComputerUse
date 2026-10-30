@@ -323,6 +323,65 @@ public sealed class SessionStartOrchestrationIntegrationTests
     }
 
     [TestMethod]
+    public void ATakeOverOfARecordThatSaysTheSwitchWasOnRestoresItBeforeTheRecordIsDeleted()
+    {
+        // The crashed owner turned the machine-wide switch on and died before its teardown: the record is
+        // the only witness, so the takeover has to restore the switch before it deletes that witness.
+        WriteLeftoverRecord(SessionState.Disconnected, DateTimeOffset.UtcNow.AddHours(-2), childSessionsOpenedByUs: true);
+        _harness.Records.TakeOverLeftover = true;
+
+        _report = Start();
+
+        Assert.AreEqual(1, _harness.Switch.RestoreCount, "The takeover must restore the switch the crashed owner left on.");
+        int restoreAt = _harness.Calls.IndexOf("switch.restore");
+        int deleteAt = _harness.Calls.IndexOf("record.delete");
+        Assert.IsGreaterThanOrEqualTo(0, restoreAt);
+        Assert.IsGreaterThanOrEqualTo(0, deleteAt);
+        Assert.IsGreaterThan(
+            restoreAt,
+            deleteAt,
+            "The restore must happen while the record still exists, because the record is the proof that the switch was ours to turn off.");
+
+        SessionOwnerRecord record = ReadRecord();
+        Assert.AreEqual(_sessionId, record.SessionId, "A restored takeover still replaces the record.");
+        Assert.IsFalse(record.ChildSessionsOpenedByUs, "This start did not open the switch, so the replacement record must not claim it.");
+    }
+
+    [TestMethod]
+    public void ATakeOverDoesNotRestoreASwitchThatAlreadyReadsOff()
+    {
+        // The record says the crashed owner opened the switch, but the machine answers off: somebody
+        // restored it already, and a second restore would turn a switch off this start never touched.
+        WriteLeftoverRecord(SessionState.Disconnected, DateTimeOffset.UtcNow.AddHours(-2), childSessionsOpenedByUs: true);
+        _harness.Records.TakeOverLeftover = true;
+        _harness.Gate.Enabled = false;
+
+        _report = Start();
+
+        Assert.AreEqual(0, _harness.Switch.RestoreCount, "A switch that reads off was already restored, so it must not be touched again.");
+    }
+
+    [TestMethod]
+    public void ATakeOverRefusesWhenTheCrashedOwnersSwitchCannotBeRestored()
+    {
+        WriteLeftoverRecord(SessionState.Disconnected, DateTimeOffset.UtcNow.AddHours(-2), childSessionsOpenedByUs: true);
+        _harness.Records.TakeOverLeftover = true;
+        _harness.Switch.Fail = true;
+        _recordMayRemain = true;
+
+        SessionStartException error = AssertStartFails(SessionErrorCode.ManualIntervention);
+
+        Assert.AreEqual(1, _harness.Switch.RestoreCount);
+        Assert.AreEqual(
+            0,
+            _harness.Records.DeleteCount,
+            "The record that proves who turned the switch on must survive a failed restore, so the next start can try again.");
+        Assert.IsTrue(_harness.LockHandle.Disposed, "The refusal must still release the lock.");
+        Assert.AreEqual(0, _harness.AgentCalls, "No agent may connect while the machine state cannot be handed over.");
+        StringAssert.Contains(error.Message, "child-session switch");
+    }
+
+    [TestMethod]
     public void ALeftoverRecordThatCannotBeTakenOverRefusesAndIsNeverDeleted()
     {
         WriteLeftoverRecord(SessionState.Ready, DateTimeOffset.UtcNow.AddHours(-2));
@@ -477,14 +536,14 @@ public sealed class SessionStartOrchestrationIntegrationTests
         return document.RootElement.GetProperty("state").GetString() ?? string.Empty;
     }
 
-    private void WriteLeftoverRecord(SessionState state, DateTimeOffset acquiredAt)
+    private void WriteLeftoverRecord(SessionState state, DateTimeOffset acquiredAt, bool childSessionsOpenedByUs = false)
     {
         _store.Write(new SessionOwnerRecord(
             Guid.NewGuid().ToString("D"),
             Environment.ProcessId + 1,
             HostStartTime,
             ChildSessionId,
-            false,
+            childSessionsOpenedByUs,
             state,
             acquiredAt));
     }
@@ -517,6 +576,7 @@ public sealed class SessionStartOrchestrationIntegrationTests
             Tier = new FakeAuthTierSource(Calls);
             Sweep = new FakeSweep(Calls);
             Gate = new FakeChildSessionsGate(Calls, enabled: true);
+            Switch = new FakeChildSessionsSwitch(Calls);
             Agent = new FakeAgentConnector(Calls, temporaryRoot);
             Pipe = new FakeOwnerPipeHost(Calls);
             SessionLookup = new FakeProcessSessionLookup(Calls);
@@ -535,6 +595,8 @@ public sealed class SessionStartOrchestrationIntegrationTests
         internal FakeSweep Sweep { get; }
 
         internal FakeChildSessionsGate Gate { get; }
+
+        internal FakeChildSessionsSwitch Switch { get; }
 
         internal FakeAgentConnector Agent { get; }
 
@@ -561,6 +623,7 @@ public sealed class SessionStartOrchestrationIntegrationTests
                 Tier,
                 Sweep,
                 Gate,
+                Switch,
                 Agent,
                 Pipe,
                 SessionLookup);
@@ -704,9 +767,13 @@ public sealed class SessionStartOrchestrationIntegrationTests
 
         internal int Count { get; private set; }
 
-        public LeftoverSweepReport Sweep()
+        /// <summary>The child session id the pipeline handed the sweep; null before the first call.</summary>
+        internal int? RecordedChildSessionId { get; private set; }
+
+        public LeftoverSweepReport Sweep(int recordedChildSessionId)
         {
             Count++;
+            RecordedChildSessionId = recordedChildSessionId;
             _calls.Add("sweep");
             if (Failure is not null)
             {
@@ -776,8 +843,34 @@ public sealed class SessionStartOrchestrationIntegrationTests
             {
                 PolicyValue.RdpInbound => ChildSessionsPolicy.RdpInboundValueName,
                 PolicyValue.ChildConnections => ChildSessionsPolicy.ChildConnectionsValueName,
-                _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown policy value."),
+                _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown child-session policy value."),
             };
+        }
+    }
+
+    /// <summary>A switch port that records restores instead of changing machine state.</summary>
+    private sealed class FakeChildSessionsSwitch : IChildSessionsSwitch
+    {
+        private readonly List<string> _calls;
+
+        internal FakeChildSessionsSwitch(List<string> calls)
+        {
+            _calls = calls;
+        }
+
+        internal int RestoreCount { get; private set; }
+
+        internal bool Fail { get; set; }
+
+        public void Restore()
+        {
+            RestoreCount++;
+            _calls.Add("switch.restore");
+            if (Fail)
+            {
+                throw new InvalidOperationException(
+                    "WTSEnableChildSessions(false) was accepted, but reading the state back still reports child sessions as enabled.");
+            }
         }
     }
 

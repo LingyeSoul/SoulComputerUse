@@ -23,7 +23,7 @@ public sealed class ChildSessionsElevatorIntegrityTests
             [0x4D, 0x5A]);
         TestInstallManifest.Write(
             directory.Path,
-            1,
+            TestInstallManifest.CurrentVersion,
             "SHA-256",
             ChildSessionsElevator.HelperFileName,
             new string('0', 64));

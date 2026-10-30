@@ -2,6 +2,7 @@ using System;
 using SoulComputerUse.Core.Session;
 using SoulComputerUse.Windows.ChildSessions;
 using SoulComputerUse.Windows.Identity;
+using SoulComputerUse.Windows.Rdp;
 using SoulComputerUse.Windows.SessionLifecycle.Teardown;
 using SoulComputerUse.Windows.SingleInstance;
 
@@ -29,11 +30,15 @@ public sealed class ProductionLeftoverSweep : ILeftoverSweep
     /// <inheritdoc />
     /// <remarks>
     /// The settle really waits: Windows finishes a logoff asynchronously, and a session that is still
-    /// listed a moment after a successful request is not a leftover that survived.
+    /// listed a moment after a successful request is not a leftover that survived. The account the sweep
+    /// runs as is read from the session table, in the adapter, so the pipeline itself stays free of
+    /// environment access; the child sessions of this product always run as that account.
     /// </remarks>
-    public LeftoverSweepReport Sweep()
+    public LeftoverSweepReport Sweep(int recordedChildSessionId)
     {
-        return new LeftoverSweeper(new WtsSessionTable(), new ThreadLogoffSettle()).Sweep();
+        WtsSessionTable sessionTable = new();
+        return new LeftoverSweeper(sessionTable, new ThreadLogoffSettle()).Sweep(
+            new LeftoverEvidence(recordedChildSessionId, sessionTable.CurrentSessionAccountName()));
     }
 }
 

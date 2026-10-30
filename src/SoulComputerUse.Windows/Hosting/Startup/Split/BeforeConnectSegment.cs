@@ -27,7 +27,9 @@ namespace SoulComputerUse.Windows.Hosting.Startup.Split;
 /// sweep, switch, marker, alternate shell. Each gate refuses as soon as it is judged, so a <c>none</c>
 /// tier refuses before anything is swept, and a failed sweep refuses before the switch is read. The
 /// refusals reuse <see cref="SessionStartOrchestrator"/>'s gate functions, so no rule and no explanation
-/// is stated twice.
+/// is stated twice. A takeover restores first: when the taken-over record says the crashed owner turned
+/// the machine-wide child-session switch on, the switch is turned back off before the record that
+/// proves it is deleted.
 /// </para>
 /// <para>
 /// A failed step cleans up unconditionally: the record this attempt wrote is deleted and the lock handle
@@ -136,9 +138,10 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         try
         {
             lockHandle = TakeLock();
-            OwnerRecordStatus recordStatus = ReadOwnerRecord();
-            if (recordStatus == OwnerRecordStatus.TakeOver)
+            OwnerRecordRead ownerRecord = ReadOwnerRecord();
+            if (ownerRecord.Status == OwnerRecordStatus.TakeOver)
             {
+                RestoreSwitchTheCrashedOwnerLeftOn(ownerRecord.Record);
                 DeleteLeftoverRecord();
             }
 
@@ -147,7 +150,11 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
             // judges. Every failure below deletes it again.
             WriteStartingRecord(childSessionsOpenedByUs: false, SessionStartStage.WriteStartingRecord);
             ProbeAuthTier();
-            SweepLeftovers();
+
+            // The taken-over record named the child session the previous owner left behind, and that
+            // record is deleted by now, so the id travels to the sweep in this argument: it is the one
+            // piece of evidence that can identify a leftover without any guesswork.
+            SweepLeftovers(ownerRecord.Record?.SubagentWtsSessionId ?? 0);
             bool childSessionsOpenedByUs = SettleChildSessions();
             ConfigureAlternateShell();
 
@@ -193,7 +200,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         return handle;
     }
 
-    private OwnerRecordStatus ReadOwnerRecord()
+    private OwnerRecordRead ReadOwnerRecord()
     {
         OwnerRecordRead read;
         try
@@ -217,7 +224,7 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         }
 
         _steps.Succeeded(SessionStartStage.ReadOwnerRecord);
-        return read.Status;
+        return read;
     }
 
     private void DeleteLeftoverRecord()
@@ -236,6 +243,74 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         }
 
         _steps.Succeeded(SessionStartStage.TakeOverRecord);
+    }
+
+    /// <summary>
+    /// Restores the machine-wide child-session switch a crashed owner left on, before the record that
+    /// proves it is deleted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A process that dies between turning the switch on and its own teardown leaves no other trace: the
+    /// next start probes the switch as already on, records that it did not open it, and never restores
+    /// it, so the machine-wide capability would stay on for ever. The taken-over record is the only
+    /// witness of who turned it on, which is why the restore runs here, while the record still exists,
+    /// and why a failed restore keeps the record on disk — this attempt has written none yet — so the
+    /// next start can try again instead of the evidence being deleted.
+    /// </para>
+    /// <para>
+    /// The record is this product's own write, so when it says the previous owner opened the switch and
+    /// the machine still reports the switch as on, the switch is restored to off even though the crashed
+    /// owner cannot be asked: a stranger who also turned it on in the meantime cannot be told apart from
+    /// the crashed owner, and the record in hand outweighs that guess. A switch that already reads off
+    /// was restored by somebody else, and a record that does not name the switch is not this start's
+    /// business, so neither is touched.
+    /// </para>
+    /// <para>
+    /// This runs only after the single-instance lock is held, so no second start can restore the same
+    /// switch concurrently. A restore that fails refuses the start instead of being swallowed, because a
+    /// machine handed over with an unowned capability is exactly the state the takeover rules exist to
+    /// prevent.
+    /// </para>
+    /// </remarks>
+    private void RestoreSwitchTheCrashedOwnerLeftOn(SessionOwnerRecord? record)
+    {
+        if (record?.ChildSessionsOpenedByUs != true)
+        {
+            return;
+        }
+
+        bool enabled;
+        try
+        {
+            enabled = _childSessionsGate.IsEnabled();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            throw StageFailure(
+                SessionStartStage.TakeOverRecord,
+                SessionErrorCode.ManualIntervention,
+                SessionStartMessages.ChildSessionsProbeFailed,
+                error);
+        }
+
+        if (!enabled)
+        {
+            return;
+        }
+
+        try
+        {
+            _childSessionsSwitch.Restore();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            throw StageFailure(
+                SessionStartStage.TakeOverRecord,
+                SessionErrorCode.ManualIntervention,
+                SessionStartMessages.SwitchRestoreOnTakeOverFailed,
+                error);
+        }
     }
 
     /// <summary>
@@ -304,13 +379,13 @@ public sealed class BeforeConnectSegment : ISessionStartBeforeConnect
         _steps.Succeeded(SessionStartStage.AuthTier);
     }
 
-    private void SweepLeftovers()
+    private void SweepLeftovers(int recordedChildSessionId)
     {
         LeftoverSweepOutcome outcome;
         Exception? sweepError = null;
         try
         {
-            LeftoverSweepReport report = _leftoverSweep.Sweep();
+            LeftoverSweepReport report = _leftoverSweep.Sweep(recordedChildSessionId);
             outcome = report.RemainingSessionIds.Count == 0
                 ? LeftoverSweepOutcome.Completed(report)
                 : LeftoverSweepOutcome.Failed(report);

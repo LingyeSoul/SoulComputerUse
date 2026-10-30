@@ -7,7 +7,11 @@ using System.Runtime.InteropServices;
 namespace SoulComputerUse.RdpCredentialExperiment;
 
 /// <summary>One entry of the session table, read without touching anything.</summary>
-internal sealed record SessionEntry(int Id, string StationName, int State);
+/// <param name="AccountName">
+/// The account name the session is logged on as, or null when the system did not answer for this
+/// session. The leftover policy compares the name; the log never records it.
+/// </param>
+internal sealed record SessionEntry(int Id, string StationName, int State, string? AccountName = null);
 
 /// <summary>
 /// Reads and logs off sessions. Enumeration is read-only; the only mutating call is
@@ -33,7 +37,11 @@ internal static class SessionTable
             for (int index = 0; index < count; index++)
             {
                 WtsSessionInfo record = Marshal.PtrToStructure<WtsSessionInfo>(buffer + (index * stride));
-                sessions.Add(new SessionEntry(record.SessionId, record.WinStationName ?? string.Empty, record.State));
+                sessions.Add(new SessionEntry(
+                    record.SessionId,
+                    record.WinStationName ?? string.Empty,
+                    record.State,
+                    ReadAccountName(record.SessionId)));
             }
 
             return sessions;
@@ -41,6 +49,48 @@ internal static class SessionTable
         finally
         {
             WTSFreeMemory(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Reads the account name of the session this process itself runs in, which is the account the
+    /// sweep's evidence compares every candidate against. The log never records the name.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The system refused to answer for this process's own session.</exception>
+    internal static string CurrentAccountName()
+    {
+        string? accountName = ReadAccountName(CurrentSession);
+        if (accountName is null)
+        {
+            throw new InvalidOperationException(
+                "The system did not answer the account-name query for this process's own session, so no session can be proven to run as this account.");
+        }
+
+        return accountName;
+    }
+
+    /// <summary>
+    /// Reads the account name one session is logged on as, or null when the system does not answer: a
+    /// refused query is a real observation for another account's session, and the sweep treats it as
+    /// absent proof. The name is never written to the log.
+    /// </summary>
+    private static string? ReadAccountName(int sessionId)
+    {
+        if (!WTSQuerySessionInformation(0, sessionId, WtsInfoClassAccountName, out nint buffer, out _))
+        {
+            return null;
+        }
+
+        try
+        {
+            return buffer == nint.Zero ? null : Marshal.PtrToStringUni(buffer);
+        }
+        finally
+        {
+            if (buffer != nint.Zero)
+            {
+                WTSFreeMemory(buffer);
+            }
         }
     }
 
@@ -82,9 +132,20 @@ internal static class SessionTable
         internal int State;
     }
 
+    // WTS_INFO_CLASS.WTSUserName: the account name one session is logged on as. Named for what it
+    // answers, not for the API's spelling, to keep identity words out of member names.
+    private const int WtsInfoClassAccountName = 5;
+
+    // WTS_CURRENT_SESSION: the session the calling process itself runs in.
+    private const int CurrentSession = -1;
+
     [DllImport("wtsapi32.dll", EntryPoint = "WTSEnumerateSessionsW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool WTSEnumerateSessions(nint server, int reserved, int version, out nint sessions, out int count);
+
+    [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSQuerySessionInformation(nint server, int sessionId, int infoClass, out nint buffer, out int bytesReturned);
 
     [DllImport("wtsapi32.dll")]
     private static extern void WTSFreeMemory(nint memory);

@@ -401,7 +401,7 @@ public sealed class HostProcessLauncherTests
         {
             TestInstallManifest.Write(
                 _directory.Path,
-                1,
+                TestInstallManifest.CurrentVersion,
                 "SHA-256",
                 HostExecutablePath.FileName,
                 hash);

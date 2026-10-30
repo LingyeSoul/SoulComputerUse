@@ -101,7 +101,7 @@ Expand-Archive -LiteralPath $zip -DestinationPath $install -Force
 Get-ChildItem -LiteralPath $install -Recurse -File | Unblock-File
 ```
 
-The directory must end up with all five executables together, plus `install-manifest.json`:
+The directory must end up with the whole archive contents - the five executables in one directory next to the runtime files they were published with, plus `install-manifest.json`:
 
 ```text
 SoulComputerUse.Host.exe
@@ -116,7 +116,7 @@ The host derives the agent and helper paths from its own directory. Splitting th
 
 ### Integrity manifest
 
-`install-manifest.json` lists the five executables with their SHA-256, the manifest version, and the product version. `scripts/install.ps1` verifies every entry after extraction and refuses to copy when the manifest is missing, declares an unsupported manifest version or algorithm, omits a required executable, lists a file that is absent, or reports a hash that does not match. The download phase performs that check before requesting elevation; the elevated phase repeats it on its payload before copying, then verifies the copied files again after writing them to `%ProgramFiles%\SoulComputerUse`. This is not a signature: it shows that the files match the manifest shipped in the same archive, not who built the release.
+`install-manifest.json` lists every file in the archive - the five executables, the .NET runtime DLLs, and anything in subdirectories - keyed by its `/`-separated path relative to the archive root, each with its SHA-256, plus the manifest version and the product version. `scripts/install.ps1` verifies the payload in both directions: every listed file must exist with a matching hash, and every file on disk must be listed, so a payload file planted or replaced between the download check and the elevated copy is refused rather than copied. Keys that are not safe relative paths - absolute paths, drives, `..` hops, backslashes - are refused, as is any manifest whose version or algorithm the script does not support. The download phase performs the check before requesting elevation; the elevated phase repeats it on its payload before copying, then verifies the copied files again after writing them to `%ProgramFiles%\SoulComputerUse`. This is not a signature: it shows that the files match the manifest shipped in the same archive, not who built the release.
 
 Optional: make `scu` available in new terminals by adding the install directory to the user `PATH` through **System Properties → Environment Variables**. Do not edit the machine-wide `PATH` just for one user.
 

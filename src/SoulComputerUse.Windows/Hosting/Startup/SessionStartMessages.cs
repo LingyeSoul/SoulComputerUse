@@ -94,6 +94,17 @@ public static class SessionStartMessages
     public const string ChildSessionsProbeFailed =
         "The machine's child-session state could not be read, so a human has to inspect it before a session starts.";
 
+    /// <summary>
+    /// The explanation for a taken-over record that said the crashed owner turned the machine-wide
+    /// child-session switch on, while this start could not turn it back off.
+    /// </summary>
+    /// <remarks>
+    /// A machine-wide capability that stays on with nobody recording it cannot be handed over silently,
+    /// so the start is refused and the record stays on disk for the next start to try again.
+    /// </remarks>
+    public const string SwitchRestoreOnTakeOverFailed =
+        "The taken-over record said the previous owner turned the machine-wide child-session switch on and never turned it off, and this start could not turn it off either, so the machine state cannot be taken over and a human has to inspect it.";
+
     /// <summary>The explanation for a policy value that is not a DWORD.</summary>
     /// <param name="value">The policy value whose stored data has the wrong type.</param>
     public static string PolicyValueMalformed(PolicyValue value)

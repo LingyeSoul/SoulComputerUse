@@ -46,6 +46,14 @@ public enum ExecutableIntegrity
 /// delete it to make the check fall back to that status.
 /// </para>
 /// <para>
+/// Manifest version 2 keys every file by its '/'-separated path relative to the manifest's directory and
+/// covers the whole installation; version 1 keyed only the five executables by bare file name. This
+/// reader accepts version 2 only: a document declaring any other version, or carrying a key that is not a
+/// safe relative path (an absolute path, a drive, a parent hop, an NTFS alternate data stream), is
+/// rejected as unreadable rather than best-effort interpreted, so a manifest this build cannot fully
+/// understand never vouches for a file.
+/// </para>
+/// <para>
 /// The status cases never throw: an absent manifest, an unreadable manifest, invalid JSON, a wrong
 /// version or algorithm, an absent target file and an unreadable target file all return a status. Only a
 /// null or whitespace argument throws.
@@ -56,11 +64,13 @@ public static class InstallManifest
     /// <summary>The manifest file name, next to this program and the executables it verifies.</summary>
     public const string FileName = "install-manifest.json";
 
-    private const int SupportedManifestVersion = 1;
+    private const int SupportedManifestVersion = 2;
     private const string SupportedAlgorithm = "SHA-256";
     private const string ManifestVersionProperty = "manifestVersion";
     private const string AlgorithmProperty = "algorithm";
     private const string FilesProperty = "files";
+
+    private static readonly char[] InvalidKeySegmentChars = Path.GetInvalidFileNameChars();
 
     private static readonly JsonDocumentOptions DocumentOptions = new()
     {
@@ -70,7 +80,7 @@ public static class InstallManifest
     };
 
     /// <summary>Verifies an executable against the manifest beside this program.</summary>
-    /// <param name="executablePath">The executable to verify; only its file name is looked up in the manifest.</param>
+    /// <param name="executablePath">The executable to verify; it is looked up by its path relative to this program's directory.</param>
     /// <returns>The comparison status.</returns>
     /// <exception cref="ArgumentException">The path is null, empty or whitespace.</exception>
     public static ExecutableIntegrity Verify(string executablePath)
@@ -80,7 +90,7 @@ public static class InstallManifest
     }
 
     /// <summary>Verifies an executable against an explicit manifest.</summary>
-    /// <param name="executablePath">The executable to verify; only its file name is looked up in the manifest.</param>
+    /// <param name="executablePath">The executable to verify; it is looked up by its path relative to the manifest's directory.</param>
     /// <param name="manifestPath">The manifest to read, which lets tests and tools verify a copied layout.</param>
     /// <returns>The comparison status.</returns>
     /// <exception cref="ArgumentException">A path is null, empty or whitespace.</exception>
@@ -94,16 +104,18 @@ public static class InstallManifest
             return ExecutableIntegrity.NotInstalled;
         }
 
-        string? fileName = Path.GetFileName(executablePath);
-        if (string.IsNullOrEmpty(fileName))
+        string? manifestKey = TryGetManifestKey(executablePath, manifestPath);
+        if (manifestKey is null)
         {
+            // An executable outside the manifest's directory has no safe relative key under it, so it
+            // cannot be the file a version 2 manifest vouches for.
             return ExecutableIntegrity.NotListed;
         }
 
         string? expectedHash;
         try
         {
-            expectedHash = ReadExpectedHash(manifestPath, fileName);
+            expectedHash = ReadExpectedHash(manifestPath, manifestKey);
         }
         catch (Exception error) when (IsUnreadableManifestError(error))
         {
@@ -145,12 +157,73 @@ public static class InstallManifest
             or NotSupportedException or ArgumentException;
     }
 
-    /// <summary>Reads the recorded hash for one file, or null when the manifest does not list it.</summary>
+    /// <summary>
+    /// Computes the '/'-separated manifest key for an executable, or null when it has none.
+    /// </summary>
+    /// <remarks>
+    /// The key is the executable's path relative to the manifest's directory. When that path cannot be
+    /// computed, or is not a safe relative path (it starts with '..' or escapes the directory), the
+    /// executable cannot be listed and null is returned, which the caller reports as NotListed.
+    /// </remarks>
+    private static string? TryGetManifestKey(string executablePath, string manifestPath)
+    {
+        try
+        {
+            string fullExecutablePath = Path.GetFullPath(executablePath);
+            string? manifestDirectory = Path.GetDirectoryName(Path.GetFullPath(manifestPath));
+            if (string.IsNullOrEmpty(manifestDirectory))
+            {
+                return null;
+            }
+
+            string key = Path.GetRelativePath(manifestDirectory, fullExecutablePath).Replace('\\', '/');
+            return IsSafeManifestKey(key) ? key : null;
+        }
+        catch (Exception error) when (error is ArgumentException or PathTooLongException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Decides whether a manifest key is a safe '/'-separated path relative to the manifest's directory.
+    /// </summary>
+    /// <remarks>
+    /// Security invariant: a key may only name a file inside the manifest's directory tree. Anything that
+    /// could point elsewhere - an empty key, a ':' (drive or NTFS alternate data stream), a '\' (a second,
+    /// ambiguous separator spelling), a leading or trailing separator, an empty segment (doubled
+    /// separator), '.', '..' - is rejected rather than normalized.
+    /// </remarks>
+    private static bool IsSafeManifestKey(string key)
+    {
+        if (key.Length == 0
+            || key.Contains(':')
+            || key.Contains('\\')
+            || key.StartsWith('/')
+            || key.EndsWith('/'))
+        {
+            return false;
+        }
+
+        foreach (string segment in key.Split('/'))
+        {
+            if (segment.Length == 0
+                || segment is "." or ".."
+                || segment.IndexOfAny(InvalidKeySegmentChars) >= 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Reads the recorded hash for one manifest key, or null when the manifest does not list it.</summary>
     /// <exception cref="InvalidDataException">The document does not follow the manifest contract.</exception>
     /// <exception cref="JsonException">The document is not valid JSON.</exception>
     /// <exception cref="IOException">The document could not be read.</exception>
     /// <exception cref="UnauthorizedAccessException">The document could not be opened.</exception>
-    private static string? ReadExpectedHash(string manifestPath, string fileName)
+    private static string? ReadExpectedHash(string manifestPath, string manifestKey)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), DocumentOptions);
         JsonElement root = document.RootElement;
@@ -187,7 +260,14 @@ public static class InstallManifest
                 throw new InvalidDataException("The installation manifest declares a file hash that is not a string.");
             }
 
-            if (string.Equals(file.Name, fileName, StringComparison.OrdinalIgnoreCase))
+            if (!IsSafeManifestKey(file.Name))
+            {
+                // One unsafe key invalidates the whole document: a manifest that cannot be fully
+                // understood must not vouch for any file it lists.
+                throw new InvalidDataException("The installation manifest lists a file key that is not a safe relative path.");
+            }
+
+            if (string.Equals(file.Name, manifestKey, StringComparison.OrdinalIgnoreCase))
             {
                 expectedHash = file.Value.GetString();
             }

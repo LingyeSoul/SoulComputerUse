@@ -337,6 +337,102 @@ public sealed class SessionStartSplitTests
     }
 
     [TestMethod]
+    public void ATakeOverOfARecordThatSaysTheSwitchWasOnRestoresItWhileTheRecordStillExists()
+    {
+        // The crashed owner turned the machine-wide switch on and died before its teardown could restore
+        // it. The taken-over record is the only witness, so the restore has to run before the record is
+        // deleted, and a machine that still reports the switch as on is the machine the record describes.
+        using BeforeConnectFixture fixture = new();
+        fixture.Records.ReadStatus = OwnerRecordStatus.TakeOver;
+        fixture.Records.TakeOverChildSessionsOpenedByUs = true;
+
+        BeforeConnectResult result = fixture.Segment.Execute();
+
+        Assert.AreEqual(1, fixture.Switch.RestoreCount, "The takeover must restore the switch the crashed owner left on.");
+        int restoreAt = fixture.Calls.IndexOf("switch.restore");
+        int deleteAt = fixture.Calls.IndexOf("record.delete");
+        Assert.IsGreaterThanOrEqualTo(0, restoreAt);
+        Assert.IsGreaterThanOrEqualTo(0, deleteAt);
+        Assert.IsGreaterThan(
+            restoreAt,
+            deleteAt,
+            "The restore must happen before the record is deleted, because the record is the proof that the switch was ours to turn off.");
+        Assert.IsTrue(result.SweepCompleted, "A restored takeover continues like any other takeover.");
+    }
+
+    [TestMethod]
+    public void ATakeOverDoesNotRestoreASwitchThatAlreadyReadsOff()
+    {
+        using BeforeConnectFixture fixture = new();
+        fixture.Records.ReadStatus = OwnerRecordStatus.TakeOver;
+        fixture.Records.TakeOverChildSessionsOpenedByUs = true;
+        fixture.Gate.Enabled = false;
+
+        fixture.Segment.Execute();
+
+        Assert.AreEqual(
+            0,
+            fixture.Switch.RestoreCount,
+            "A switch that reads off was restored by somebody else, so the takeover must not turn off a switch this start never touched.");
+    }
+
+    [TestMethod]
+    public void ATakeOverOfARecordThatDoesNotNameTheSwitchNeverTouchesIt()
+    {
+        using BeforeConnectFixture fixture = new();
+        fixture.Records.ReadStatus = OwnerRecordStatus.TakeOver;
+        fixture.Gate.Enabled = true;
+
+        fixture.Segment.Execute();
+
+        Assert.AreEqual(0, fixture.Switch.RestoreCount, "A record that does not name the switch is not this start's business.");
+    }
+
+    [TestMethod]
+    public void ATakeOverRefusesWhenTheCrashedOwnersSwitchCannotBeRestored()
+    {
+        using BeforeConnectFixture fixture = new();
+        fixture.Records.ReadStatus = OwnerRecordStatus.TakeOver;
+        fixture.Records.TakeOverChildSessionsOpenedByUs = true;
+        fixture.Switch.Fail = true;
+
+        SessionStartException error = Assert.ThrowsExactly<SessionStartException>(() => fixture.Segment.Execute());
+
+        Assert.AreEqual(SessionErrorCode.ManualIntervention, error.Code, error.Message);
+        StringAssert.Contains(error.Message, "child-session switch");
+        Assert.AreEqual(
+            0,
+            fixture.Records.DeleteCount,
+            "The record that proves who turned the switch on must survive a failed restore, so the next start can try again.");
+        Assert.AreEqual(0, fixture.Records.WriteCount, "A refused takeover must not have written its own record over the evidence.");
+        Assert.AreEqual(0, fixture.Sweep.Count, "No session may be swept while the machine state cannot be handed over.");
+        Assert.IsTrue(fixture.Handle.Disposed, "The refusal must still release the lock handle.");
+    }
+
+    [TestMethod]
+    public void TheSweepReceivesTheChildSessionIdTheTakenOverRecordNamed()
+    {
+        using BeforeConnectFixture takeOver = new();
+        takeOver.Records.ReadStatus = OwnerRecordStatus.TakeOver;
+
+        takeOver.Segment.Execute();
+
+        Assert.AreEqual(
+            ChildSessionId,
+            takeOver.Sweep.RecordedChildSessionId,
+            "The taken-over record is deleted before the sweep runs, so the child session id it named has to reach the sweep as an argument; without it the sweep could only judge by station shape, which cannot tell this product's leftover from a person's session.");
+
+        using BeforeConnectFixture absent = new();
+
+        absent.Segment.Execute();
+
+        Assert.AreEqual(
+            0,
+            absent.Sweep.RecordedChildSessionId,
+            "With no record on disk the sweep must receive zero, which names no session and leaves only shape-based proofs.");
+    }
+
+    [TestMethod]
     public void ADeniedPolicyValueRefusesBeforeElevationAndNamesTheValue()
     {
         using BeforeConnectFixture fixture = new();
@@ -978,6 +1074,9 @@ public sealed class SessionStartSplitTests
 
         internal OwnerRecordStatus ReadStatus { get; set; } = OwnerRecordStatus.Absent;
 
+        /// <summary>Whether the record the fake hands to a takeover says the switch was opened by the previous owner.</summary>
+        internal bool TakeOverChildSessionsOpenedByUs { get; set; }
+
         internal int ReadCount { get; private set; }
 
         internal int WriteCount { get; private set; }
@@ -1000,7 +1099,7 @@ public sealed class SessionStartSplitTests
                     Environment.ProcessId,
                     HostStartTime,
                     ChildSessionId,
-                    false,
+                    TakeOverChildSessionsOpenedByUs,
                     SessionState.Disconnected,
                     AcquiredAt)),
                 OwnerRecordStatus.NotTakeable => OwnerRecordRead.NotTakeable(),
@@ -1064,9 +1163,13 @@ public sealed class SessionStartSplitTests
 
         internal int Count { get; private set; }
 
-        public LeftoverSweepReport Sweep()
+        /// <summary>The child session id the pipeline handed the sweep; null before the first call.</summary>
+        internal int? RecordedChildSessionId { get; private set; }
+
+        public LeftoverSweepReport Sweep(int recordedChildSessionId)
         {
             Count++;
+            RecordedChildSessionId = recordedChildSessionId;
             _calls.Add("sweep");
             if (Failure is not null)
             {
@@ -1158,10 +1261,17 @@ public sealed class SessionStartSplitTests
 
         internal int RestoreCount { get; private set; }
 
+        internal bool Fail { get; set; }
+
         public void Restore()
         {
             RestoreCount++;
             _calls.Add("switch.restore");
+            if (Fail)
+            {
+                throw new InvalidOperationException(
+                    "WTSEnableChildSessions(false) was accepted, but reading the state back still reports child sessions as enabled.");
+            }
         }
     }
 
@@ -1222,7 +1332,7 @@ public sealed class SessionStartSplitTests
     {
         internal FakeSessionConnector()
         {
-            Gate = new ConnectionGate(LeftoverVerdict.NoLeftover, Array.Empty<SessionCandidate>());
+            Gate = new ConnectionGate(LeftoverVerdict.NoLeftover, Array.Empty<SessionCandidate>(), Array.Empty<SessionCandidate>());
         }
 
         internal Exception? GateFailure { get; set; }

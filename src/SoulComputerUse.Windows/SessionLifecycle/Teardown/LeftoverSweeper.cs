@@ -62,17 +62,38 @@ public sealed class LeftoverSweeper
     /// <summary>
     /// Logs off every leftover child session and confirms that each of them is gone.
     /// </summary>
+    /// <param name="evidence">What the policy proves with: the taken-over record's child session id and this process's account.</param>
     /// <returns>The ids the sweep logged off; both lists are empty when nothing was left over.</returns>
     /// <exception cref="InvalidOperationException">
-    /// A target is the service or the console session, a logoff request was refused, or a requested
-    /// session survived the request. A refusal carries the attempt's report under
-    /// <see cref="ReportDataKey"/>.
+    /// A session is neither provably ours nor provably somebody else's, a target is the service or the
+    /// console session, a logoff request was refused, or a requested session survived the request. A
+    /// refusal carries the attempt's report under <see cref="ReportDataKey"/>.
     /// </exception>
     /// <exception cref="System.ComponentModel.Win32Exception">The session table could not be read.</exception>
-    public LeftoverSweepReport Sweep()
+    public LeftoverSweepReport Sweep(LeftoverEvidence evidence)
     {
+        ArgumentNullException.ThrowIfNull(evidence);
+
         int consoleSessionId = _sessionTable.ActiveConsoleSessionId();
-        IReadOnlyList<SessionCandidate> leftovers = FindLeftovers(_sessionTable.Read(), consoleSessionId);
+        List<SessionCandidate> candidates = [];
+        foreach (WtsSessionEntry entry in _sessionTable.Read())
+        {
+            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State, entry.AccountName));
+        }
+
+        IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(candidates, consoleSessionId, evidence);
+        IReadOnlyList<SessionCandidate> unproven = LeftoverChildSessionPolicy.FindUnproven(candidates, consoleSessionId, evidence);
+
+        // The undecided sessions stop the sweep before its first logoff request: logging anything off
+        // while one of them exists would decide a question the evidence could not, and the operator who
+        // has to look at the machine must see the machine exactly as the sweep found it.
+        if (unproven.Count > 0)
+        {
+            throw Refuse(
+                DescribeSessions(unproven) + " cannot be proven to be this product's leftovers or another person's sessions, so the sweep logs nothing off.",
+                new LeftoverSweepReport(Array.Empty<int>(), Array.Empty<int>()));
+        }
+
         if (leftovers.Count == 0)
         {
             return new LeftoverSweepReport(Array.Empty<int>(), Array.Empty<int>());
@@ -81,7 +102,10 @@ public sealed class LeftoverSweeper
         List<int> loggedOff = new(leftovers.Count);
         foreach (SessionCandidate leftover in leftovers)
         {
-            LogOffTargetGuard.EnsureRemovable(leftover.Id, consoleSessionId);
+            // The console session id is re-read before every logoff request: a fast user switch between
+            // two requests changes who sits on the console, and a guard that checks a stale snapshot
+            // would clear a target that has become the operator's own desktop in the meantime.
+            LogOffTargetGuard.EnsureRemovable(leftover.Id, _sessionTable.ActiveConsoleSessionId());
             try
             {
                 _sessionTable.LogOff(leftover.Id);
@@ -118,18 +142,22 @@ public sealed class LeftoverSweeper
         return new LeftoverSweepReport(loggedOff.AsReadOnly(), Array.Empty<int>());
     }
 
-    /// <summary>Maps table entries onto the policy's candidate shape.</summary>
-    private static IReadOnlyList<SessionCandidate> FindLeftovers(
-        IReadOnlyList<WtsSessionEntry> entries,
-        int consoleSessionId)
+    /// <summary>
+    /// Names sessions by count and id only. The sweep's messages carry neither a station name nor an
+    /// account name, so a refusal can be pasted into a report without identifying anybody.
+    /// </summary>
+    private static string DescribeSessions(IReadOnlyList<SessionCandidate> sessions)
     {
-        List<SessionCandidate> candidates = new(entries.Count);
-        foreach (WtsSessionEntry entry in entries)
+        List<string> ids = new(sessions.Count);
+        foreach (SessionCandidate session in sessions)
         {
-            candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+            ids.Add(session.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
-        return LeftoverChildSessionPolicy.FindLeftovers(candidates, consoleSessionId);
+        return sessions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " session(s) (session id(s) "
+            + string.Join(", ", ids)
+            + ")";
     }
 
     /// <summary>

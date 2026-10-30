@@ -15,9 +15,15 @@ namespace SoulComputerUse.Windows.Hosting.Startup;
 public interface ILeftoverSweep
 {
     /// <summary>Logs off every leftover child session and confirms that none survived.</summary>
+    /// <param name="recordedChildSessionId">
+    /// The child session id the ownership record named when this start took it over, or zero when no
+    /// record named one. The sweep may treat that exact session as this product's leftover; every other
+    /// session needs its own proof.
+    /// </param>
     /// <exception cref="Exception">
-    /// The table could not be read, a logoff request was refused, or a requested session survived. The
-    /// exception may carry the attempt's report under <see cref="LeftoverSweeper.ReportDataKey"/>.
+    /// The table could not be read, a session is neither provably ours nor provably foreign, a logoff
+    /// request was refused, or a requested session survived. The exception may carry the attempt's
+    /// report under <see cref="LeftoverSweeper.ReportDataKey"/>.
     /// </exception>
-    LeftoverSweepReport Sweep();
+    LeftoverSweepReport Sweep(int recordedChildSessionId);
 }

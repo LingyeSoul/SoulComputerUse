@@ -591,6 +591,12 @@ internal sealed class NewSessionHost : IDisposable
     /// logged on answers the next connection without asking the operator to log on, which the contract
     /// makes a hard precondition rather than a warning, so the cleanup runs on the abort path too and
     /// reports itself when the logoff cannot be confirmed.
+    /// <para>
+    /// The request goes through <see cref="WtsChildSessionLogOff"/>, never straight to the table: the id
+    /// this run recorded may have been freed and reused between the recording and this cleanup, and the
+    /// port re-reads the table and proves the target is still this product's own child session before
+    /// any system call, so the abort path can never sign an innocent session off.
+    /// </para>
     /// </summary>
     private void ReleaseUnfinishedChildSession()
     {
@@ -603,7 +609,7 @@ internal sealed class NewSessionHost : IDisposable
         try
         {
             WtsSessionTable table = new();
-            table.LogOff(createdSessionId);
+            new WtsChildSessionLogOff(table).LogOff(createdSessionId);
 
             // A Windows logoff is asynchronous: the session stays listed for several seconds after a
             // request that succeeded, so the confirmation has to be repeated instead of read once.

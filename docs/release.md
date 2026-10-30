@@ -52,11 +52,11 @@ install-manifest.json
 
 ## 完整性清单
 
-应用压缩包根目录包含 `install-manifest.json`，记录五个 exe 各自的 SHA-256：
+应用压缩包根目录包含 `install-manifest.json`，记录压缩包内**全部文件**（含 .NET 运行时 DLL 与子目录文件）各自的 SHA-256。键为相对压缩包根目录、以 `/` 分隔的相对路径（清单自身除外）：
 
 ```json
 {
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "productVersion": "1.2.3",
   "algorithm": "SHA-256",
   "files": {
@@ -64,12 +64,18 @@ install-manifest.json
     "SoulComputerUse.Cli.exe": "<sha256>",
     "SoulComputerUse.Host.exe": "<sha256>",
     "SoulComputerUse.Mcp.exe": "<sha256>",
-    "SoulComputerUse.SessionAgent.exe": "<sha256>"
+    "SoulComputerUse.SessionAgent.exe": "<sha256>",
+    "coreclr.dll": "<sha256>",
+    "runtimes/win-x64/some-native.dll": "<sha256>"
   }
 }
 ```
 
-安装脚本在解压后、复制前逐个校验；文件缺失、版本或算法不符合约定、缺少必需条目、哈希不一致都会拒绝安装。复制到 `%ProgramFiles%\SoulComputerUse` 后还会再校验一次。
+（条目为示意，实际清单覆盖压缩包内每一个文件。）
+
+安装脚本对解压出的 payload 做双向校验：manifest 列出的每个文件必须存在且哈希一致，盘上的实际文件也必须与 manifest 条目完全相等——多出的未列名文件同样拒绝（fail-closed），不给"解压后、提权复制前"的窗口期留替换空间。键必须是不含 `..`、不含盘符/绝对路径、不含反斜杠、以 `/` 分隔的安全相对路径。`manifestVersion` 不是 2、算法不是 SHA-256、缺少必需 exe 条目、哈希不一致，一律拒绝安装。复制到 `%ProgramFiles%\SoulComputerUse` 后按同一规则再校验一次。
+
+`manifestVersion` 2 的语义：v1 只按根目录文件名列出五个 exe；v2 改为相对路径键并覆盖全部文件。读取端只认自己理解的版本，解析到其他版本直接拒绝，不猜测旧格式。
 
 它不是签名：清单只能证明文件与清单一致，不能证明是谁构建了发布。只有 Authenticode 签名才能证明构建者身份。
 
@@ -84,12 +90,11 @@ pwsh -NoProfile -File .\scripts\package-release.ps1 `
 脚本会：
 
 1. 依次 publish `Host`、`Cli`、`Mcp` 到同一个临时目录；
-2. 校验五个必需 exe；
-3. 复制 `LICENSE`；
-4. 写入 `install-manifest.json`（五个 exe 的 SHA-256）；
-5. 生成应用 zip 和 skill zip；
-6. 写入 `SHA256SUMS.txt`；
-7. 输出三个产物的路径（JSON）。
+2. 复制 `LICENSE`；
+3. 写入 `install-manifest.json`（staging 目录内全部文件的 SHA-256，键为 `/` 分隔的相对路径），并核对五个必需 exe 都在清单里；
+4. 生成应用 zip 和 skill zip；
+5. 写入 `SHA256SUMS.txt`；
+6. 输出三个产物的路径（JSON）。
 
 ## 发布前检查
 

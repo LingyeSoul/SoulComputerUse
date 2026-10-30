@@ -106,18 +106,23 @@ public sealed class IntegrationSuiteLifecycle
 
         // A logged-on child session answers the next connection without asking for a logon, which the
         // contract forbids. The check lives here so the suite says so once, instead of failing later in
-        // cases that read the session table and cannot explain what they saw.
+        // cases that read the session table and cannot explain what they saw. The sweep's evidence is
+        // this process's own account, because a child session of this product always runs as the
+        // account that started it; the suite holds no ownership record, so no recorded session id exists.
         try
         {
+            WtsSessionTable table = new();
             List<SessionCandidate> candidates = [];
-            foreach (WtsSessionEntry entry in new WtsSessionTable().Read())
+            foreach (WtsSessionEntry entry in table.Read())
             {
-                candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State));
+                candidates.Add(new SessionCandidate(entry.Id, entry.StationName, entry.State, entry.AccountName));
             }
 
+            LeftoverEvidence evidence = new(0, table.CurrentSessionAccountName());
             IReadOnlyList<SessionCandidate> leftovers = LeftoverChildSessionPolicy.FindLeftovers(
                 candidates,
-                WtsSessionProbe.GetActiveConsoleSessionId());
+                WtsSessionProbe.GetActiveConsoleSessionId(),
+                evidence);
             if (leftovers.Count > 0)
             {
                 List<string> ids = [];
@@ -129,6 +134,17 @@ public sealed class IntegrationSuiteLifecycle
                 problems.Add(
                     "child session id(s) " + string.Join(", ", ids)
                     + " are still logged on; log them off first, or the next connection would skip the logon gate");
+            }
+
+            IReadOnlyList<SessionCandidate> unproven = LeftoverChildSessionPolicy.FindUnproven(
+                candidates,
+                WtsSessionProbe.GetActiveConsoleSessionId(),
+                evidence);
+            if (unproven.Count > 0)
+            {
+                problems.Add(
+                    unproven.Count.ToString(CultureInfo.InvariantCulture)
+                    + " session(s) are logged on that are neither provably this product's leftovers nor provably another person's sessions; a case would refuse to sweep or connect while they exist");
             }
         }
         catch (System.ComponentModel.Win32Exception error)

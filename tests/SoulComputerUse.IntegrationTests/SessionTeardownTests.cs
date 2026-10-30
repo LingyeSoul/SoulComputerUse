@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading;
 using SoulComputerUse.Windows.Native;
+using SoulComputerUse.Windows.Rdp;
 using SoulComputerUse.Windows.SessionLifecycle;
 using SoulComputerUse.Windows.SessionLifecycle.Teardown;
 using SoulComputerUse.Windows.SingleInstance;
@@ -24,6 +25,21 @@ public sealed class SessionTeardownTests
 {
     private const int ServiceSessionId = 0;
     private const int ChildSessionId = 15;
+
+    /// <summary>The account the sweep's evidence names; the child sessions of this product run as it.</summary>
+    private const string OperatorAccount = "operator";
+
+    /// <summary>WTSDisconnected: the state a session holds when its client is gone but its logon is not.</summary>
+    private const int DisconnectedState = LeftoverChildSessionPolicy.DisconnectedState;
+
+    /// <summary>
+    /// WTSActive: the state a session holds while a client is attached. A teardown may legitimately meet
+    /// its own child session in this state, because nothing disconnects the client before the teardown.
+    /// </summary>
+    private const int ActiveState = 0;
+
+    /// <summary>The sweep evidence of every case here: this account, and no recorded child session id.</summary>
+    private static readonly LeftoverEvidence Evidence = new(0, OperatorAccount);
 
     private string _lockName = string.Empty;
 
@@ -98,7 +114,7 @@ public sealed class SessionTeardownTests
                 new WtsSessionEntry(1, "Console", 0),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence);
 
         Assert.IsEmpty(report.LoggedOffSessionIds, "Nothing of ours is left over, so nothing may be logged off.");
         Assert.IsEmpty(report.RemainingSessionIds);
@@ -115,10 +131,10 @@ public sealed class SessionTeardownTests
             [
                 new WtsSessionEntry(0, "Services", 4),
                 new WtsSessionEntry(1, "Console", 0),
-                new WtsSessionEntry(ChildSessionId, "RDP-Tcp#0", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, OperatorAccount),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence);
 
         CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(table.LogOffCalls));
         CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(report.LoggedOffSessionIds));
@@ -135,16 +151,81 @@ public sealed class SessionTeardownTests
             [
                 new WtsSessionEntry(0, "Services", 4),
                 new WtsSessionEntry(1, "Console", 0),
-                new WtsSessionEntry(15, "RDP-Tcp#0", 0),
-                new WtsSessionEntry(22, "RDP-Tcp#0", 0),
+                new WtsSessionEntry(15, string.Empty, DisconnectedState, OperatorAccount),
+                new WtsSessionEntry(22, string.Empty, DisconnectedState, OperatorAccount),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence);
 
         CollectionAssert.AreEqual(new List<int> { 15, 22 }, new List<int>(table.LogOffCalls));
         CollectionAssert.AreEqual(new List<int> { 15, 22 }, new List<int>(report.LoggedOffSessionIds));
         Assert.IsEmpty(report.RemainingSessionIds);
         Assert.AreEqual(2, table.ReadCount, "The sweep reads once to decide and once again to confirm the logoffs took effect.");
+    }
+
+    [TestMethod]
+    public void ASweepRefusesBeforeItsFirstLogoffWhenASessionIsNeitherProvenOursNorProvenForeign()
+    {
+        // A person who closed the remote-desktop window while staying logged on looks exactly like this
+        // entry, and so may this product's unmeasured leftover shape. The sweep may neither log it off
+        // nor go past it, and it may not log anything else off on the way out either.
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4, null),
+                new WtsSessionEntry(1, "Console", 0, OperatorAccount),
+                new WtsSessionEntry(9, "RDP-Tcp#3", DisconnectedState, OperatorAccount),
+                new WtsSessionEntry(15, string.Empty, DisconnectedState, OperatorAccount),
+            ]);
+
+        InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence));
+
+        StringAssert.StartsWith(
+            error.Message,
+            "manual_intervention_required:",
+            "An undecidable session must be the manual-intervention refusal of the contract, never a warning and never a guess.");
+        Assert.IsEmpty(
+            table.LogOffCalls,
+            "The sweep logged a session off even though another session could not be decided; a refusal must leave the machine exactly as it was found.");
+
+        LeftoverSweepReport? attempt = error.Data[LeftoverSweeper.ReportDataKey] as LeftoverSweepReport;
+        Assert.IsNotNull(attempt, "The refusal must carry the attempt's report, so the caller can see nothing was tried.");
+        Assert.IsEmpty(attempt.LoggedOffSessionIds);
+        Assert.IsEmpty(attempt.RemainingSessionIds);
+    }
+
+    [TestMethod]
+    public void ASweepReReadsTheConsoleSessionBeforeEveryLogOffSoAFastUserSwitchCannotPoisonATarget()
+    {
+        // Between two logoff requests the operator may fast-switch the console onto a session the sweep
+        // judged a moment earlier. A guard that checks the snapshot from before the first request would
+        // clear the second target although it has become the operator's own desktop in the meantime.
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4, null),
+                new WtsSessionEntry(1, "Console", 0, OperatorAccount),
+                new WtsSessionEntry(15, string.Empty, DisconnectedState, OperatorAccount),
+                new WtsSessionEntry(22, string.Empty, DisconnectedState, OperatorAccount),
+            ])
+        {
+            ConsoleSessionIdAfterALogOff = 22,
+        };
+
+        InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence));
+
+        Assert.Contains(
+            "active console session",
+            error.Message,
+            "The guard must refuse on the re-read console session id, not on the stale snapshot from before the first logoff.");
+        CollectionAssert.AreEqual(
+            new List<int> { 15 },
+            new List<int>(table.LogOffCalls),
+            "The first leftover may be logged off, but the session that became the console must never be requested.");
     }
 
     [TestMethod]
@@ -156,14 +237,14 @@ public sealed class SessionTeardownTests
             [
                 new WtsSessionEntry(0, "Services", 4),
                 new WtsSessionEntry(1, "Console", 0),
-                new WtsSessionEntry(ChildSessionId, "RDP-Tcp#0", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, OperatorAccount),
             ])
         {
             SurvivesLogOff = true,
         };
 
         InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
-            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep());
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence));
 
         StringAssert.StartsWith(
             error.Message,
@@ -186,14 +267,14 @@ public sealed class SessionTeardownTests
             [
                 new WtsSessionEntry(0, "Services", 4),
                 new WtsSessionEntry(1, "Console", 0),
-                new WtsSessionEntry(ChildSessionId, "RDP-Tcp#0", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, OperatorAccount),
             ])
         {
             RefuseLogOff = true,
         };
 
         InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
-            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep());
+            () => new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence));
 
         StringAssert.StartsWith(error.Message, "manual_intervention_required:");
         Assert.AreEqual(1, table.ReadCount, "A refused request leaves nothing to verify, so the sweep must not claim a re-read happened.");
@@ -207,10 +288,10 @@ public sealed class SessionTeardownTests
             entries:
             [
                 new WtsSessionEntry(0, "Services", 4),
-                new WtsSessionEntry(1, "RDP-Tcp#0", 0),
+                new WtsSessionEntry(1, string.Empty, DisconnectedState, OperatorAccount),
             ]);
 
-        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep();
+        LeftoverSweepReport report = new LeftoverSweeper(table, new ImmediateLogoffSettle()).Sweep(Evidence);
 
         Assert.IsEmpty(table.LogOffCalls, "The console session id always wins over the station name; signing the operator out is unrecoverable.");
         Assert.IsEmpty(report.LoggedOffSessionIds);
@@ -244,15 +325,133 @@ public sealed class SessionTeardownTests
     }
 
     [TestMethod]
-    public void TheLogOffPortPassesAPositiveIdToTheTable()
+    public void TheLogOffPortPassesAProvenTargetToTheTable()
     {
+        // The shape a teardown normally meets: the child session the record names is disconnected — its
+        // window is gone — and it is logged on as the account this process runs as, which is the proof
+        // the port may act on.
         FakeSessionTable table = new(
             consoleSessionId: 1,
-            entries: [new WtsSessionEntry(0, "Services", 4), new WtsSessionEntry(1, "Console", 0)]);
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4),
+                new WtsSessionEntry(1, "Console", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, OperatorAccount),
+            ])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
 
         new WtsChildSessionLogOff(table).LogOff(ChildSessionId);
 
         CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(table.LogOffCalls));
+    }
+
+    [TestMethod]
+    public void TheLogOffPortAlsoPassesAStillConnectedTargetTheRecordNames()
+    {
+        // The tearing-down process may itself still be the target's client — nothing disconnects the
+        // control before the teardown runs — so a target that is still active is not a stranger's
+        // session: the recorded id plus the same account is the proof, the state is not part of it.
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4),
+                new WtsSessionEntry(1, "Console", 0),
+                new WtsSessionEntry(ChildSessionId, "RDP-Tcp#7", ActiveState, OperatorAccount),
+            ])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
+
+        new WtsChildSessionLogOff(table).LogOff(ChildSessionId);
+
+        CollectionAssert.AreEqual(new List<int> { ChildSessionId }, new List<int>(table.LogOffCalls));
+    }
+
+    [TestMethod]
+    public void TheLogOffPortTreatsATargetThatAlreadyDisappearedAsSuccessWithoutCallingTheSystem()
+    {
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries: [new WtsSessionEntry(0, "Services", 4), new WtsSessionEntry(1, "Console", 0)])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
+
+        new WtsChildSessionLogOff(table).LogOff(ChildSessionId);
+
+        Assert.IsEmpty(table.LogOffCalls, "A session the table no longer lists has already met the logoff's goal, so no request may be sent.");
+    }
+
+    [TestMethod]
+    public void TheLogOffPortRefusesATargetThatBecameTheConsoleSession()
+    {
+        // The freed id was reused by a fast user switch and now names the operator's own desktop.
+        FakeSessionTable table = new(
+            consoleSessionId: ChildSessionId,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4),
+                new WtsSessionEntry(ChildSessionId, "Console", 0, OperatorAccount),
+            ])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => new WtsChildSessionLogOff(table).LogOff(ChildSessionId));
+
+        Assert.IsEmpty(table.LogOffCalls, "The current console session must never be the target of a logoff request.");
+    }
+
+    [TestMethod]
+    public void TheLogOffPortRefusesATargetTheEvidenceCannotDecideAbout()
+    {
+        // The account query for the target was not answered, so neither ownership nor foreignness is
+        // proven; the request must not guess in either direction.
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4),
+                new WtsSessionEntry(1, "Console", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, null),
+            ])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
+
+        InvalidOperationException error = Assert.ThrowsExactly<InvalidOperationException>(
+            () => new WtsChildSessionLogOff(table).LogOff(ChildSessionId));
+
+        StringAssert.Contains(
+            error.Message,
+            ChildSessionId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "The refusal names the session id, which carries no account, path or station name.");
+        Assert.IsEmpty(table.LogOffCalls);
+    }
+
+    [TestMethod]
+    public void TheLogOffPortRefusesATargetNowLoggedInAsAnotherAccount()
+    {
+        // The freed id was reused by another person's session; logging it off would destroy somebody
+        // else's unsaved work, so the recorded id alone is not enough.
+        FakeSessionTable table = new(
+            consoleSessionId: 1,
+            entries:
+            [
+                new WtsSessionEntry(0, "Services", 4),
+                new WtsSessionEntry(1, "Console", 0),
+                new WtsSessionEntry(ChildSessionId, string.Empty, DisconnectedState, "stranger"),
+            ])
+        {
+            CurrentAccountName = OperatorAccount,
+        };
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => new WtsChildSessionLogOff(table).LogOff(ChildSessionId));
+
+        Assert.IsEmpty(table.LogOffCalls, "A session of another account is never this product's child session, whatever id it reused.");
     }
 
     [TestMethod]
@@ -440,14 +639,22 @@ public sealed class SessionTeardownTests
     /// </summary>
     private sealed class FakeSessionTable : IWtsSessionTable
     {
-        private readonly int _consoleSessionId;
         private readonly List<WtsSessionEntry> _entries;
 
         internal FakeSessionTable(int consoleSessionId, IReadOnlyList<WtsSessionEntry> entries)
         {
-            _consoleSessionId = consoleSessionId;
+            ConsoleSessionId = consoleSessionId;
             _entries = new List<WtsSessionEntry>(entries);
         }
+
+        /// <summary>
+        /// The console session id the fake reports right now, so a case can move the console between two
+        /// reads the way a fast user switch does.
+        /// </summary>
+        internal int ConsoleSessionId { get; set; }
+
+        /// <summary>The console session id the fake switches to after any logoff request, if a case sets one.</summary>
+        internal int? ConsoleSessionIdAfterALogOff { get; init; }
 
         internal List<int> LogOffCalls { get; } = [];
 
@@ -466,6 +673,11 @@ public sealed class SessionTeardownTests
         public void LogOff(int sessionId)
         {
             LogOffCalls.Add(sessionId);
+            if (ConsoleSessionIdAfterALogOff is int switched)
+            {
+                ConsoleSessionId = switched;
+            }
+
             if (RefuseLogOff)
             {
                 throw new Win32Exception(5, "The session table refused the logoff request.");
@@ -479,8 +691,20 @@ public sealed class SessionTeardownTests
 
         public int ActiveConsoleSessionId()
         {
-            return _consoleSessionId;
+            return ConsoleSessionId;
         }
+
+        /// <summary>
+        /// The account this fake answers for the process's own session. The sweep's cases name the
+        /// account in their evidence instead, so the fake keeps answering nothing until a case sets it.
+        /// </summary>
+        public string? CurrentSessionAccountName()
+        {
+            return CurrentAccountName;
+        }
+
+        /// <summary>The account name <see cref="CurrentSessionAccountName"/> answers; null until a case sets one.</summary>
+        internal string? CurrentAccountName { get; set; }
     }
 
     /// <summary>

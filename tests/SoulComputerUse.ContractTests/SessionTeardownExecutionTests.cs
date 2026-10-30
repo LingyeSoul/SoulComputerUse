@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -383,6 +384,144 @@ public sealed class SessionTeardownExecutionTests
         Assert.ThrowsExactly<ArgumentNullException>(() => new SessionTeardownExecutor(new FakeStateTransition([]), null!, new FakeSwitch([]), new FakeLockRelease([])));
         Assert.ThrowsExactly<ArgumentNullException>(() => new SessionTeardownExecutor(new FakeStateTransition([]), new FakeLogOff([]), null!, new FakeLockRelease([])));
         Assert.ThrowsExactly<ArgumentNullException>(() => new SessionTeardownExecutor(new FakeStateTransition([]), new FakeLogOff([]), new FakeSwitch([]), null!));
+    }
+
+    /// <summary>The repository marker the structural scan anchors on, so the working directory does not matter.</summary>
+    private const string RepositoryMarker = "SoulComputerUse.slnx";
+
+    /// <summary>
+    /// The only production files allowed to ask the session table itself to log a session off: the
+    /// reviewed logoff port, the sweep, and the experiment's own sweep, which proves its targets with the
+    /// same policy and re-reads the console session before every request.
+    /// </summary>
+    private static readonly string[] DirectTableLogOffFiles =
+    [
+        "src/SoulComputerUse.Windows/SessionLifecycle/Teardown/WtsChildSessionLogOff.cs",
+        "src/SoulComputerUse.Windows/SessionLifecycle/Teardown/LeftoverSweeper.cs",
+        "src/SoulComputerUse.RdpCredentialExperiment/ConnectRun.cs",
+    ];
+
+    [TestMethod]
+    public void TheSessionTableIsAskedToLogOffOnlyByTheTwoReviewedCallers()
+    {
+        // The reviewed logoff port proves its target on every call and the sweep proves its own, so a
+        // third caller that names a session id and calls the table directly is exactly the blind logoff
+        // the review rules forbid: an id that was freed and reused would sign an innocent session off.
+        string root = FindRepositoryRoot();
+        List<string> sources = CollectSources(Path.Combine(root, "src"));
+        Assert.IsGreaterThanOrEqualTo(10, sources.Count, "Too few sources were read, so a clean scan would prove nothing.");
+
+        List<string> violations = [];
+        foreach (string source in sources)
+        {
+            foreach (string line in File.ReadAllLines(source))
+            {
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith('*'))
+                {
+                    continue;
+                }
+
+                if (trimmed.Contains("table.LogOff(", StringComparison.OrdinalIgnoreCase)
+                    && !DirectTableLogOffFiles.Contains(Relative(root, source), StringComparer.OrdinalIgnoreCase))
+                {
+                    violations.Add(Relative(root, source));
+                    break;
+                }
+            }
+        }
+
+        Assert.IsEmpty(
+            violations,
+            "Files outside the reviewed logoff port and the sweep ask the session table to log a session off directly ("
+            + string.Join(", ", violations)
+            + "). Route them through WtsChildSessionLogOff, which re-reads the table and proves the target first.");
+    }
+
+    [TestMethod]
+    public void TheHostSendsBothOfItsLogOffPathsThroughTheReviewedPort()
+    {
+        // The contract close and the abort-path cleanup are the two places that name a child session id
+        // on the host; both have to go through the reviewed port, or one of them keeps the blind logoff.
+        string root = FindRepositoryRoot();
+        string hostFile = Path.Combine(
+            root,
+            "src/SoulComputerUse.Host/NewSessionHost.cs".Replace('/', Path.DirectorySeparatorChar));
+
+        Assert.IsTrue(File.Exists(hostFile), "The host's session mode source is missing, so its logoff wiring cannot be proved.");
+        string host = File.ReadAllText(hostFile);
+
+        Assert.IsGreaterThanOrEqualTo(
+            2,
+            CountOccurrences(host, "new WtsChildSessionLogOff("),
+            "The host must build the reviewed logoff port on both the contract close and the unfinished-start cleanup; fewer than two means one path still bypasses the re-check.");
+        Assert.IsGreaterThanOrEqualTo(
+            1,
+            CountOccurrences(host, "executor"),
+            "The contract close must run through the teardown executor for this wiring to mean anything.");
+    }
+
+    /// <summary>Counts how often one text contains a needle.</summary>
+    private static int CountOccurrences(string text, string needle)
+    {
+        int count = 0;
+        int index = text.IndexOf(needle, StringComparison.Ordinal);
+        while (index >= 0)
+        {
+            count++;
+            index = text.IndexOf(needle, index + needle.Length, StringComparison.Ordinal);
+        }
+
+        return count;
+    }
+
+    private static List<string> CollectSources(string sourceRoot)
+    {
+        List<string> sources = [];
+        if (!Directory.Exists(sourceRoot))
+        {
+            return sources;
+        }
+
+        foreach (string candidate in Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            if (IsBuildOutput(candidate))
+            {
+                continue;
+            }
+
+            sources.Add(candidate);
+        }
+
+        return sources;
+    }
+
+    private static bool IsBuildOutput(string path)
+    {
+        return path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || path.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, RepositoryMarker)))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new AssertFailedException(
+            $"Could not find {RepositoryMarker} above the test binary, so the teardown wiring cannot be checked.");
+    }
+
+    private static string Relative(string root, string path)
+    {
+        return Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
     }
 
     private static SessionTeardownExecutor CreateExecutor(

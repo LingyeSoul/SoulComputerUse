@@ -49,7 +49,8 @@ public sealed class WtsSessionTable : IWtsSessionTable
                 sessions.Add(new WtsSessionEntry(
                     record.SessionId,
                     record.WinStationName ?? string.Empty,
-                    record.State));
+                    record.State,
+                    ReadAccountName(record.SessionId)));
             }
 
             return sessions.AsReadOnly();
@@ -57,6 +58,56 @@ public sealed class WtsSessionTable : IWtsSessionTable
         finally
         {
             WtsSessionNative.WTSFreeMemory(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Reads the account name of the session this process itself runs in, which is the account the sweep
+    /// compares every candidate against: a child session of this product always runs as the account that
+    /// started it. The name comes from the same system answer the per-session names come from, so the
+    /// comparison never mixes two different name shapes.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The system refused to answer for this process's own session.</exception>
+    public string? CurrentSessionAccountName()
+    {
+        string? accountName = ReadAccountName(WtsSessionNative.CurrentSession);
+        if (accountName is null)
+        {
+            throw new InvalidOperationException(
+                "The system did not answer the account-name query for this process's own session, so the sweep cannot prove any session to run as this account.");
+        }
+
+        return accountName;
+    }
+
+    /// <summary>
+    /// Reads the account name one session is logged on as. A refused query returns null instead of
+    /// throwing: the system does not answer for another account's session when this process holds
+    /// ordinary rights, and the leftover policy treats an unreadable name as absent proof, which is the
+    /// safe direction for a decision that ends sessions.
+    /// </summary>
+    private static string? ReadAccountName(int sessionId)
+    {
+        if (!WtsSessionNative.WTSQuerySessionInformationW(
+                nint.Zero,
+                sessionId,
+                WtsSessionNative.WtsInfoClassAccountName,
+                out nint buffer,
+                out _))
+        {
+            return null;
+        }
+
+        try
+        {
+            return buffer == nint.Zero ? null : Marshal.PtrToStringUni(buffer);
+        }
+        finally
+        {
+            if (buffer != nint.Zero)
+            {
+                WtsSessionNative.WTSFreeMemory(buffer);
+            }
         }
     }
 

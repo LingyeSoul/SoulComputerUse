@@ -7,7 +7,7 @@ Builds the self-contained Windows x64 release archives and their checksums.
 .DESCRIPTION
 Publishes the host, CLI, and MCP entry points into one staging directory, verifies that the
 host's child-session agent and elevation helper are present, writes install-manifest.json
-with the SHA-256 of each required executable, then creates:
+with the SHA-256 of every file in the staging directory, then creates:
 
   SoulComputerUse-win-x64.zip
   soul-computer-use-skill.zip
@@ -82,13 +82,6 @@ try {
         }
     }
 
-    foreach ($executable in $requiredExecutables) {
-        $executablePath = Join-Path $staging $executable
-        if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
-            throw "The staging directory is missing '$executable'. Publish the host before the CLI and MCP."
-        }
-    }
-
     $licensePath = Join-Path $repositoryRoot 'LICENSE'
     if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
         throw "The repository LICENSE file is missing; the release must ship it."
@@ -96,16 +89,30 @@ try {
 
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $staging 'LICENSE') -Force
 
-    # The installer verifies this manifest before copying anything; the file names stay at the archive root.
+    # The installer verifies this manifest before and after every copy, and it refuses any file the
+    # manifest does not list, so every payload file must carry a hash here. Keys are '/'-separated
+    # paths relative to the archive root; the manifest itself is written afterwards and cannot list
+    # itself. Sorting keeps two runs over identical bytes byte-identical.
     $manifestName = 'install-manifest.json'
     $manifestFiles = [ordered]@{}
-    foreach ($executable in $requiredExecutables) {
-        $executablePath = Join-Path $staging $executable
-        $manifestFiles[$executable] = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $payloadFiles = Get-ChildItem -LiteralPath $staging -Recurse -File | Sort-Object -Property FullName
+    foreach ($payloadFile in $payloadFiles) {
+        $relativeKey = [System.IO.Path]::GetRelativePath($staging, $payloadFile.FullName).Replace('\', '/')
+        $manifestFiles[$relativeKey] = (Get-FileHash -LiteralPath $payloadFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 
+    # The full enumeration above is the real coverage; this lower bound keeps a release that lost an
+    # entry point from ever reaching the manifest, because the installer refuses a key set without them.
+    foreach ($executable in $requiredExecutables) {
+        if (-not $manifestFiles.Contains($executable)) {
+            throw "The staging directory is missing '$executable'. Publish the host before the CLI and MCP."
+        }
+    }
+
+    # manifestVersion 2 keys files by '/'-separated path relative to the archive root and covers every
+    # file; version 1 listed only the five executables by bare file name.
     $manifest = [ordered]@{
-        manifestVersion = 1
+        manifestVersion = 2
         productVersion = $Version
         algorithm = 'SHA-256'
         files = $manifestFiles

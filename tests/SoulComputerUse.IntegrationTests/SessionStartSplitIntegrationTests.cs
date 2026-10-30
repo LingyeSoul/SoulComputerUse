@@ -486,7 +486,7 @@ public sealed class SessionStartSplitIntegrationTests
             _calls = calls;
         }
 
-        public LeftoverSweepReport Sweep()
+        public LeftoverSweepReport Sweep(int recordedChildSessionId)
         {
             _calls.Add("sweep");
             return new LeftoverSweepReport(Array.Empty<int>(), Array.Empty<int>());

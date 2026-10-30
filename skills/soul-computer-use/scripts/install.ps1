@@ -81,7 +81,11 @@ $checksumName = 'SHA256SUMS.txt'
 $manifestName = 'install-manifest.json'
 $resultName = 'install-result.json'
 $manifestAlgorithm = 'SHA-256'
-$supportedManifestVersion = 1
+# Version 2 keys files by '/'-separated path relative to the payload root and lists every file in the
+# archive; version 1 listed only the five executables by bare file name, which left unlisted payload
+# files unverified between the download check and the elevated copy. A version this script does not
+# understand is refused rather than best-effort interpreted, so old and new artifacts never mix.
+$supportedManifestVersion = 2
 $requiredExecutables = @(
     'SoulComputerUse.Host.exe',
     'SoulComputerUse.ChildSessionsHelper.exe',
@@ -157,10 +161,81 @@ function Get-ReleaseAsset {
     return $asset
 }
 
+function Test-ManifestKey {
+    <#
+    .SYNOPSIS
+    Decides whether one manifest key is a safe relative path: '/'-separated and rooted at the payload root.
+
+    .DESCRIPTION
+    A key that names anything outside the payload tree - an absolute path, a drive, a parent hop ('..'),
+    an NTFS alternate data stream (':'), or a leading/trailing separator - could steer the later
+    Join-Path at another target, so every such shape is refused rather than normalized.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Key
+    )
+
+    # ':' is both the drive separator (C:\evil) and the alternate-data-stream separator (file.dll:stream),
+    # and '\' would be a second, ambiguous separator spelling, so either rejects the key outright.
+    if ($Key.Length -eq 0 -or $Key.IndexOf(':') -ge 0 -or $Key.IndexOf('\') -ge 0) {
+        return $false
+    }
+
+    if ($Key[0] -eq '/' -or $Key.EndsWith('/')) {
+        return $false
+    }
+
+    $segments = $Key.Split('/')
+    foreach ($segment in $segments) {
+        # An empty segment means a doubled separator ('a//b'), '.' is the current directory, and '..'
+        # climbs out of the root; normalizing any of them would hide where the key really points.
+        if ($segment.Length -eq 0 -or $segment -eq '.' -or $segment -eq '..') {
+            return $false
+        }
+
+        if ($segment.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-ManifestKeyForFile {
+    <#
+    .SYNOPSIS
+    Builds the manifest key ('/'-separated path relative to the root) for one file under a root.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$File
+    )
+
+    $rootPrefix = $Root.TrimEnd('\') + '\'
+    if (-not $File.FullName.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "'$($File.FullName)' does not live under '$Root', so it has no manifest key."
+    }
+
+    return $File.FullName.Substring($rootPrefix.Length).Replace('\', '/')
+}
+
 function Assert-ManifestFiles {
     <#
     .SYNOPSIS
-    Verifies that every file listed in install-manifest.json exists under a root and matches its SHA-256.
+    Verifies that the files under a root are exactly the files install-manifest.json lists, each with a matching SHA-256.
+
+    .DESCRIPTION
+    The check is fail-closed in both directions: a listed file that is missing or changed refuses the
+    install, and so does a file on disk that no manifest entry lists, because the installer copies the
+    whole tree and an unlisted native DLL would reach %ProgramFiles% without ever being hashed. Only
+    the manifest file itself may sit unlisted under the root: it cannot hash itself.
     #>
     [CmdletBinding()]
     param(
@@ -184,25 +259,40 @@ function Assert-ManifestFiles {
     }
 
     foreach ($fileEntry in $ManifestFiles.PSObject.Properties) {
-        $name = $fileEntry.Name
-        if ($name.Length -eq 0 -or $name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $name -eq '.' -or $name -eq '..') {
-            throw "'$ManifestName' lists '$name', which is not a plain file name at the archive root; refusing to install unverified bytes."
+        $key = $fileEntry.Name
+        if (-not (Test-ManifestKey -Key $key)) {
+            throw "'$ManifestName' lists '$key', which is not a safe '/'-separated path relative to the payload root; refusing to install unverified bytes."
         }
 
         $expectedHash = [string]$fileEntry.Value
         if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
-            throw "'$ManifestName' does not contain a SHA-256 hash for '$name'; refusing to install unverified bytes."
+            throw "'$ManifestName' does not contain a SHA-256 hash for '$key'; refusing to install unverified bytes."
         }
 
-        $filePath = Join-Path $Root $name
+        $filePath = Join-Path $Root ($key.Replace('/', '\'))
         if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-            throw "'$ManifestName' lists '$name', which is missing from '$Root'; refusing to install unverified bytes."
+            throw "'$ManifestName' lists '$key', which is missing from '$Root'; refusing to install unverified bytes."
         }
 
         $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash
         if (-not [string]::Equals($actualHash, $expectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "SHA-256 mismatch for '$name' in '$Root'. Expected $expectedHash, got $actualHash; refusing to install unverified bytes."
+            throw "SHA-256 mismatch for '$key' in '$Root'. Expected $expectedHash, got $actualHash; refusing to install unverified bytes."
         }
+    }
+
+    # Reverse check: every file on disk must be listed. -Force includes hidden and system files, which
+    # the wildcard copy below still transports into %ProgramFiles%.
+    $listedKeys = @($ManifestFiles.PSObject.Properties | ForEach-Object { $_.Name })
+    $presentKeys = @(
+        Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
+            ForEach-Object { Get-ManifestKeyForFile -Root $Root -File $_ } |
+            Where-Object { $_ -ne $ManifestName }
+    )
+
+    $extraKeys = @($presentKeys | Where-Object { $listedKeys -notcontains $_ })
+    if ($extraKeys.Count -gt 0) {
+        $extraList = ($extraKeys | Sort-Object) -join ', '
+        throw "'$Root' contains files that '$ManifestName' does not list: $extraList; refusing to install unverified bytes."
     }
 }
 
@@ -369,7 +459,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Install') {
         $destinationPopulated = $true
 
         Copy-Item -Path (Join-Path $payloadFull '*') -Destination $destinationFull -Recurse -Force
-        Get-ChildItem -LiteralPath $destinationFull -Recurse -File | Unblock-File
+        Get-ChildItem -LiteralPath $destinationFull -Recurse -File -Force | Unblock-File
 
         Assert-ManifestFiles -ManifestFiles $manifestFiles -Root $destinationFull -RequiredNames $requiredExecutables -ManifestName $manifestName
 
