@@ -240,14 +240,17 @@ public sealed class AgentPipeServer : IAsyncDisposable
         // sends is materialized past the limit.
         OwnerFrameReader reader = new(pipe);
 
-        using StreamWriter writer = new(pipe, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
-        {
-            AutoFlush = false,
-            NewLine = "\n",
-        };
-
         try
         {
+            // Declared inside the try: disposing the writer flushes even an empty buffer, and that flush
+            // fails with a broken-pipe IOException once the peer is gone. The dispose must stay within
+            // this connection's catch below instead of faulting the run loop the caller awaits.
+            using StreamWriter writer = new(pipe, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
+            {
+                AutoFlush = false,
+                NewLine = "\n",
+            };
+
             int clientProcessId = AgentPeerIdentity.GetClientProcessId(pipe);
             AgentPeerIdentity.EnsureSameUser(
                 AgentPeerIdentity.CurrentUserSid(),

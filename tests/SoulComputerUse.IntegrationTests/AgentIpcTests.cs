@@ -202,6 +202,26 @@ public sealed class AgentIpcTests
     }
 
     [TestMethod]
+    public async Task DisconnectDuringHandshakeDoesNotFaultTheRunLoop()
+    {
+        string pipeName = NewPipeName();
+        await using AgentPipeServer server = new(pipeName, AgentNonce.Create(), new StubAgentToolHandler(), ServerTimings());
+        Task run = server.RunAsync(CancellationToken.None);
+        await server.WaitUntilListeningAsync(CancellationToken.None).WaitAsync(CaseTimeout);
+
+        // The peer reads the hello and disconnects without answering. The server then ends the connection
+        // with the client side already gone, so disposing the writer flushes into a broken pipe; that must
+        // end this connection only, never the run loop the caller awaits.
+        await using (RawAgentClient raw = await RawAgentClient.ConnectAsync(pipeName))
+        {
+            string? helloLine = await raw.ReadLineAsync();
+            Assert.IsNotNull(helloLine);
+        }
+
+        await run.WaitAsync(CaseTimeout);
+    }
+
+    [TestMethod]
     public async Task MissingHelloAckIsReportedAsAgentTimeout()
     {
         string pipeName = NewPipeName();

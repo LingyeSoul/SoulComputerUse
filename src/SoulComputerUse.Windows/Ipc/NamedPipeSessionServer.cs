@@ -355,17 +355,21 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
     private async Task HandleConnectionAsync(NamedPipeServerStream stream, CancellationToken token)
     {
         OwnerFrameReader reader = new(stream);
-        using StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
-        {
-            AutoFlush = false,
-            NewLine = "\n",
-        };
 
         using SemaphoreSlim writeGate = new(1, 1);
         List<Task> requests = [];
 
         try
         {
+            // Declared inside the try: disposing the writer flushes even an empty buffer, and that flush
+            // fails with a broken-pipe IOException once the peer is gone. Only this connection may end,
+            // never the accept loop, so the dispose must run where the catch below can observe it.
+            using StreamWriter writer = new(stream, Utf8WithoutBom, StreamBufferSize, leaveOpen: true)
+            {
+                AutoFlush = false,
+                NewLine = "\n",
+            };
+
             while (!token.IsCancellationRequested)
             {
                 OwnerFrameReadResult read = await reader.ReadLineAsync(token).ConfigureAwait(false);
@@ -415,6 +419,11 @@ public sealed class NamedPipeSessionServer : IAsyncDisposable
         {
             // The server is shutting down. The requests that already started are awaited below, before the
             // stream and the write gate are disposed; leaving the loop early must not abandon them.
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException)
+        {
+            // The peer closed its side; only this connection ended, and the accept loop keeps serving the
+            // next client. The requests that already started are still awaited below.
         }
 
         await Task.WhenAll(requests).ConfigureAwait(false);
